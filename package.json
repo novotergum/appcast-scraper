@@ -1,0 +1,14 @@
+{
+  "name": "appcast-scraper",
+  "version": "1.0.0",
+  "description": "Scraper für Appcast/Stepstone API, ausführbar via GitHub Actions",
+  "main": "src/scrape-appcast.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/scrape-appcast.js"
+  },
+  "dependencies": {
+    "cheerio": "^1.0.0",
+    "node-fetch": "^3.3.2"
+  }
+}
