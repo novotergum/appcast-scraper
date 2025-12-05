@@ -1,13 +1,18 @@
+import calendar
 import json
 import os
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlencode
 
 from playwright.sync_api import sync_playwright
 
 BASE_URL = "https://appcast-de.appcast.io"
 LOGIN_URL = f"{BASE_URL}/cc/user-sessions/login"
 DEFAULT_EMPLOYER_ID = "27620"
+
+# Zustände, die du auch in den URLs hattest
+STATUSES = ["sponsored", "unsponsored", "expired", "aggregated", "suspended"]
 
 
 def previous_month_yyyy_mm() -> str:
@@ -16,6 +21,15 @@ def previous_month_yyyy_mm() -> str:
     first_of_this_month = today.replace(day=1)
     last_day_prev_month = first_of_this_month - timedelta(days=1)
     return f"{last_day_prev_month.year}-{last_day_prev_month.month:02d}"
+
+
+def month_start_end(selected_month: str) -> tuple[str, str]:
+    """Ermittelt ersten und letzten Tag des Monats im Format YYYY-MM-DD."""
+    year, month = map(int, selected_month.split("-"))
+    last_day = calendar.monthrange(year, month)[1]
+    start = f"{year}-{month:02d}-01"
+    end = f"{year}-{month:02d}-{last_day:02d}"
+    return start, end
 
 
 def get_config():
@@ -31,11 +45,39 @@ def get_config():
     employer_id = os.getenv("APPCAST_EMPLOYER_ID", DEFAULT_EMPLOYER_ID)
     selected_month = os.getenv("APPCAST_SELECTED_MONTH") or previous_month_yyyy_mm()
 
+    job_board_ids_raw = os.getenv("APPCAST_JOB_BOARD_IDS", "")
+    job_board_ids = [
+        jb.strip() for jb in job_board_ids_raw.split(",") if jb.strip()
+    ]
+
+    tiles_job_board_id = os.getenv("APPCAST_TILES_JOB_BOARD_ID", "")
+
     return {
         "email": email,
         "password": password,
         "employer_id": employer_id,
         "selected_month": selected_month,
+        "job_board_ids": job_board_ids,
+        "tiles_job_board_id": tiles_job_board_id,
+    }
+
+
+def build_common_report_params() -> dict:
+    """Gemeinsame Parameter für by_month / by_day / by_week / by_dynamic_field."""
+    return {
+        "devise": "all",
+        "job_group_stats_source": "data",
+        "traffic": "all_wo_organic",
+        "sort": "date-desc",
+        "publisher_type": "all",
+        "account_manager_id": "all",
+        "job_group_status": "data",
+        "tier": "",
+        "selected_certified_filter": "all_sponsored",
+        "boomerang": "all",
+        "sales_manager_id": "all",
+        "salesforce_name": "all",
+        "status[]": STATUSES,
     }
 
 
@@ -84,23 +126,46 @@ def login_with_playwright(pw, cfg):
     return browser, context
 
 
-def fetch_hero_metrics(cfg):
+def fetch_and_save(api_context, url_path: str, params: dict, out_file: Path):
+    """Hilfsfunktion: Request bauen, GET ausführen, JSON speichern."""
+    query = urlencode(params, doseq=True)
+    full_url = f"{url_path}?{query}" if query else url_path
+
+    print(f"GET {full_url}")
+    resp = api_context.get(full_url)
+    if not resp.ok:
+        text = resp.text()
+        raise RuntimeError(
+            f"Request fehlgeschlagen: {resp.status} {resp.status_text()}\n{text}"
+        )
+
+    data = resp.json()
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    out_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    print(f"Gespeichert unter: {out_file.resolve()}")
+
+
+def fetch_all_reports(cfg):
     selected_month = cfg["selected_month"]
     employer_id = cfg["employer_id"]
+    month_start, month_end = month_start_end(selected_month)
+    year = selected_month.split("-")[0]
+    year_start = f"{year}-1-1"
+    year_end = f"{year}-12-31"
 
     with sync_playwright() as pw:
         browser, context = login_with_playwright(pw, cfg)
 
-        # Storage-State aus dem Browserkontext holen
         state = context.storage_state()
-
-        # API-Request-Kontext mit denselben Cookies
         api_context = pw.request.new_context(
             base_url=BASE_URL,
             storage_state=state,
         )
 
-        params = {
+        out_dir = Path("data")
+
+        # 1) hero_metrics (wie bisher)
+        hero_params = {
             "selected_month": selected_month,
             "devise": "all",
             "publisher_type": "all",
@@ -108,25 +173,103 @@ def fetch_hero_metrics(cfg):
             "channel_type": "programmatic",
             "job_group_stats_source": "data",
         }
+        fetch_and_save(
+            api_context,
+            f"/api/reports/employer/{employer_id}/hero_metrics",
+            hero_params,
+            out_dir / f"hero_metrics_{selected_month}.json",
+        )
 
-        url = f"/api/reports/employer/{employer_id}/hero_metrics"
-        print(f"Rufe {url} mit params={params} auf …")
+        # Gemeinsame Basis für weitere Reports
+        common = build_common_report_params()
 
-        resp = api_context.get(url, params=params)
-        if not resp.ok:
-            text = resp.text()
-            raise RuntimeError(
-                f"hero_metrics fehlgeschlagen: {resp.status} {resp.status_text()}\n{text}"
-            )
+        # 2) by_month (Jahresübersicht)
+        by_month_params = {
+            **common,
+            "start_month": year_start,
+            "end_month": year_end,
+        }
+        fetch_and_save(
+            api_context,
+            f"/api/reports/employer/{employer_id}/by_month",
+            by_month_params,
+            out_dir / f"by_month_{year}.json",
+        )
 
-        data = resp.json()
+        # 3) by_dynamic_field (tagged_category_id, kompletter Monat)
+        by_dyn_params = {
+            **common,
+            "pjg": "false",
+            "start_month": year_start,
+            "end_month": year_end,
+            "dynamic_field": "tagged_category_id",
+            "start_date": month_start,
+            "end_date": month_end,
+            "per_page": 100,
+        }
+        fetch_and_save(
+            api_context,
+            f"/api/reports/employer/{employer_id}/by_dynamic_field",
+            by_dyn_params,
+            out_dir / f"by_dynamic_field_tagged_category_{selected_month}.json",
+        )
 
-        out_dir = Path("data")
-        out_dir.mkdir(parents=True, exist_ok=True)
-        out_file = out_dir / f"hero_metrics_{selected_month}.json"
-        out_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        # 4) by_week (Monatszeitraum)
+        by_week_params = {
+            **common,
+            "start_date": month_start,
+            "end_date": month_end,
+        }
+        fetch_and_save(
+            api_context,
+            f"/api/reports/employer/{employer_id}/by_week",
+            by_week_params,
+            out_dir / f"by_week_{selected_month}.json",
+        )
 
-        print(f"hero_metrics gespeichert unter: {out_file.resolve()}")
+        # 5) by_day (Monatszeitraum)
+        by_day_params = {
+            **common,
+            "start_date": month_start,
+            "end_date": month_end,
+        }
+        fetch_and_save(
+            api_context,
+            f"/api/reports/employer/{employer_id}/by_day",
+            by_day_params,
+            out_dir / f"by_day_{selected_month}.json",
+        )
+
+        # 6) by_source_index (job_board-spezifisch, Monatszeitraum)
+        source_params = {
+            "start_date": month_start,
+            "end_date": month_end,
+            "status[]": STATUSES,
+            "traffic": "all",
+            "job_group_stats_source": "data",
+        }
+        if cfg["job_board_ids"]:
+            # job_boards[]=ac-571&job_boards[]=...
+            source_params["job_boards[]"] = cfg["job_board_ids"]
+
+        fetch_and_save(
+            api_context,
+            f"/api/reports/employer/{employer_id}/by_source_index",
+            source_params,
+            out_dir / f"by_source_index_{selected_month}.json",
+        )
+
+        # 7) tiles_by_day (Dashboard-Kacheln pro Tag)
+        tiles_params = {
+            "selected_month": selected_month,
+            "job_board_id": cfg["tiles_job_board_id"],
+        }
+        fetch_and_save(
+            api_context,
+            f"/api/dashboards/employer/{employer_id}/tiles_by_day",
+            tiles_params,
+            out_dir / f"tiles_by_day_{selected_month}.json",
+        )
 
         api_context.dispose()
         browser.close()
@@ -138,7 +281,7 @@ def main():
         f"Starte Appcast-Scraper für Employer {cfg['employer_id']} "
         f"und Monat {cfg['selected_month']} …"
     )
-    fetch_hero_metrics(cfg)
+    fetch_all_reports(cfg)
 
 
 if __name__ == "__main__":
