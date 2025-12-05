@@ -5,11 +5,8 @@ from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
-
 BASE_URL = "https://appcast-de.appcast.io"
 LOGIN_URL = f"{BASE_URL}/cc/user-sessions/login"
-
-# Fallback-Employer-ID, kann per Secret überschrieben werden
 DEFAULT_EMPLOYER_ID = "27620"
 
 
@@ -24,10 +21,11 @@ def previous_month_yyyy_mm() -> str:
 def get_config():
     email = os.getenv("APPCAST_EMAIL")
     password = os.getenv("APPCAST_PASSWORD")
+
     if not email or not password:
         raise RuntimeError(
             "APPCAST_EMAIL und/oder APPCAST_PASSWORD sind nicht gesetzt. "
-            "Bitte als GitHub Secrets hinterlegen."
+            "Bitte beide als GitHub Secrets hinterlegen."
         )
 
     employer_id = os.getenv("APPCAST_EMPLOYER_ID", DEFAULT_EMPLOYER_ID)
@@ -41,52 +39,54 @@ def get_config():
     }
 
 
-def login_with_playwright(pw, config):
+def login_with_playwright(pw, cfg):
     """
-    Öffnet headless den Login, füllt E-Mail und Passwort und wartet,
-    bis /api/info/user erfolgreich zurückkommt.
-    Gibt den BrowserContext zurück.
+    2-step Login:
+
+    1. E-Mail eingeben, Log In klicken
+    2. Auf Passwortfeld warten, Passwort eingeben, erneut Log In klicken
     """
     browser = pw.chromium.launch(headless=True)
     context = browser.new_context()
     page = context.new_page()
 
+    print(f"Öffne Login-Seite: {LOGIN_URL}")
     page.goto(LOGIN_URL, wait_until="networkidle")
 
-    # E-Mail
-    page.fill('input[name="email"]', config["email"])
+    # Schritt 1: E-Mail
+    print("Fülle E-Mail-Feld …")
+    page.fill("#user_session_email", cfg["email"])
 
-    # Passwort – hier Annahme: es gibt ein klassisches Passwort-Feld
-    try:
-        page.fill('input[type="password"]', config["password"])
-    except Exception:
-        # Wenn es wirklich kein Passwort-Feld gibt, ist das ein Problem
-        raise RuntimeError(
-            "Kein Passwort-Feld gefunden. Wenn der Login nur über Magic-Link läuft, "
-            "ist vollautomatisches Login im CI nicht möglich."
-        )
+    print("Klicke ersten 'Log In' …")
+    page.click("button.btn-login")
 
-    # Login-Button klicken
-    page.click('button[type="submit"]')
+    # Schritt 2: Passwortfeld abwarten
+    print("Warte auf Passwortfeld …")
+    page.wait_for_selector("#user_session_password", timeout=30_000)
 
-    # Warten, bis /api/info/user kommt und 200 liefert
+    print("Fülle Passwort-Feld …")
+    page.fill("#user_session_password", cfg["password"])
+
+    print("Klicke zweiten 'Log In' …")
+    page.click("button.btn-login")
+
+    # Warten, bis /api/info/user mit 200 kommt → sicher eingeloggt
     def is_logged_in(response):
         return "/api/info/user" in response.url and response.status == 200
 
+    print("Warte auf erfolgreiche /api/info/user-Response …")
     page.wait_for_response(is_logged_in, timeout=30_000)
+    print("Login erfolgreich.")
+
     return browser, context
 
 
-def fetch_hero_metrics(config):
-    """
-    Nutzt den eingeloggten Context, um hero_metrics via API zu holen,
-    und speichert das JSON in data/hero_metrics_YYYY-MM.json.
-    """
-    selected_month = config["selected_month"]
-    employer_id = config["employer_id"]
+def fetch_hero_metrics(cfg):
+    selected_month = cfg["selected_month"]
+    employer_id = cfg["employer_id"]
 
     with sync_playwright() as pw:
-        browser, context = login_with_playwright(pw, config)
+        browser, context = login_with_playwright(pw, cfg)
 
         # Storage-State aus dem Browserkontext holen
         state = context.storage_state()
@@ -118,12 +118,11 @@ def fetch_hero_metrics(config):
 
         data = resp.json()
 
-        # Ausgabeordner
         out_dir = Path("data")
         out_dir.mkdir(parents=True, exist_ok=True)
         out_file = out_dir / f"hero_metrics_{selected_month}.json"
-
         out_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
         print(f"hero_metrics gespeichert unter: {out_file.resolve()}")
 
         api_context.dispose()
@@ -131,12 +130,12 @@ def fetch_hero_metrics(config):
 
 
 def main():
-    config = get_config()
+    cfg = get_config()
     print(
-        f"Starte Appcast-Scraper für Employer {config['employer_id']} "
-        f"und Monat {config['selected_month']} …"
+        f"Starte Appcast-Scraper für Employer {cfg['employer_id']} "
+        f"und Monat {cfg['selected_month']} …"
     )
-    fetch_hero_metrics(config)
+    fetch_hero_metrics(cfg)
 
 
 if __name__ == "__main__":
