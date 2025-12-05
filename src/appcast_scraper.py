@@ -41,10 +41,10 @@ def get_config():
 
 def login_with_playwright(pw, cfg):
     """
-    2-step Login:
+    Zweistufiger Login:
 
-    1. E-Mail eingeben, Log In klicken
-    2. Auf Passwortfeld warten, Passwort eingeben, erneut Log In klicken
+    1) E-Mail eingeben, Log In klicken
+    2) Passwortfeld abwarten, Passwort eingeben, erneut Log In klicken
     """
     browser = pw.chromium.launch(headless=True)
     context = browser.new_context()
@@ -72,10 +72,13 @@ def login_with_playwright(pw, cfg):
 
     # Warten, bis /api/info/user mit 200 kommt → sicher eingeloggt
     def is_logged_in(response):
-        return "/api/info/user" in response.url and response.status == 200
+        try:
+            return "/api/info/user" in response.url and response.status == 200
+        except Exception:
+            return False
 
     print("Warte auf erfolgreiche /api/info/user-Response …")
-    page.wait_for_response(is_logged_in, timeout=30_000)
+    context.wait_for_event("response", predicate=is_logged_in, timeout=30_000)
     print("Login erfolgreich.")
 
     return browser, context
