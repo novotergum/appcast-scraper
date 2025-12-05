@@ -1,0 +1,45 @@
+name: Scrape Appcast
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 4 * * *"  # täglich um 04:00 UTC
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm ci
+        env:
+          # falls du npm ci nicht nutzen willst:
+          # run: npm install
+          # keine ENV nötig
+          NODE_ENV: production
+
+      - name: Run scraper
+        run: npm start
+        env:
+          APPCAST_BASE_URL: "https://appcast-de.appcast.io"
+          APPCAST_EMPLOYER_ID: ${{ secrets.APPCAST_EMPLOYER_ID }}
+          APPCAST_EMAIL: ${{ secrets.APPCAST_EMAIL }}
+          APPCAST_PASSWORD: ${{ secrets.APPCAST_PASSWORD }}
+          # Optional eigene Zeiträume:
+          # APPCAST_START_DATE: "2025-11-01"
+          # APPCAST_END_DATE: "2025-12-05"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: appcast-data
+          path: data/
+          if-no-files-found: warn
