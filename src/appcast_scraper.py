@@ -34,6 +34,17 @@ def month_start_end(selected_month: str) -> tuple[str, str]:
     return start, end
 
 
+def last_n_days_range(n: int) -> tuple[str, str]:
+    """
+    Liefert einen Datumsbereich der letzten n Tage einschließlich heute
+    im Format (start_date, end_date) als YYYY-MM-DD.
+    """
+    today = datetime.utcnow().date()
+    end_date = today
+    start_date = end_date - timedelta(days=n - 1)
+    return start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")
+
+
 def get_config():
     email = os.getenv("APPCAST_EMAIL")
     password = os.getenv("APPCAST_PASSWORD")
@@ -45,7 +56,8 @@ def get_config():
         )
 
     employer_id = os.getenv("APPCAST_EMPLOYER_ID", DEFAULT_EMPLOYER_ID)
-    # Immer aktueller Monat, kein Override per Umgebungsvariable
+    # Für hero_metrics / tiles_by_day weiterhin ein Monats-Parameter,
+    # aber alle Report-„start_date“/„end_date“-Ranges werden auf die letzten 30 Tage gesetzt.
     selected_month = current_month_yyyy_mm()
 
     job_board_ids_raw = os.getenv("APPCAST_JOB_BOARD_IDS", "")
@@ -269,13 +281,21 @@ def send_by_day_to_webhook(
         print(f"Fehler beim Senden an Webhook: {e}")
 
 
-def fetch_all_reports(cfg):
+def fetch_all_reports(cfg, period_start: str, period_end: str):
+    """
+    Holt alle Reports für einen beliebigen Datumsbereich period_start/period_end
+    (YYYY-MM-DD). Die meisten Endpunkte werden auf diesen Bereich gesetzt.
+    hero_metrics / tiles_by_day bleiben monatsbasiert.
+    """
     selected_month = cfg["selected_month"]
     employer_id = cfg["employer_id"]
-    month_start, month_end = month_start_end(selected_month)
-    year = selected_month.split("-")[0]
+
+    # Jahr anhand des Enddatums bestimmen (für Jahres-Reports)
+    year = period_end.split("-")[0]
     year_start = f"{year}-1-1"
     year_end = f"{year}-12-31"
+
+    period_label = f"{period_start}_to_{period_end}"
 
     with sync_playwright() as pw:
         browser, context = login_with_playwright(pw, cfg)
@@ -288,7 +308,7 @@ def fetch_all_reports(cfg):
 
         out_dir = Path("data")
 
-        # 1) hero_metrics (wie bisher)
+        # 1) hero_metrics (monatsbasiert, weiterhin aktueller Monat)
         hero_params = {
             "selected_month": selected_month,
             "devise": "all",
@@ -307,7 +327,7 @@ def fetch_all_reports(cfg):
         # Gemeinsame Basis für weitere Reports
         common = build_common_report_params()
 
-        # 2) by_month (Jahresübersicht)
+        # 2) by_month (Jahresübersicht für das Jahr des Enddatums)
         by_month_params = {
             **common,
             "start_month": year_start,
@@ -320,54 +340,56 @@ def fetch_all_reports(cfg):
             out_dir / f"by_month_{year}.json",
         )
 
-        # 3) by_dynamic_field (tagged_category_id, kompletter Monat)
+        # 3) by_dynamic_field (tagged_category_id, Zeitraum last 30 days)
         by_dyn_params = {
             **common,
             "pjg": "false",
             "start_month": year_start,
             "end_month": year_end,
             "dynamic_field": "tagged_category_id",
-            "start_date": month_start,
-            "end_date": month_end,
+            "start_date": period_start,
+            "end_date": period_end,
             "per_page": 100,
         }
         fetch_and_save(
             api_context,
             f"/api/reports/employer/{employer_id}/by_dynamic_field",
             by_dyn_params,
-            out_dir / f"by_dynamic_field_tagged_category_{selected_month}.json",
+            out_dir
+            / f"by_dynamic_field_tagged_category_{period_label}.json",
         )
 
-        # 4) by_week (Monatszeitraum)
+        # 4) by_week (Zeitraum last 30 days)
         by_week_params = {
             **common,
-            "start_date": month_start,
-            "end_date": month_end,
+            "start_date": period_start,
+            "end_date": period_end,
         }
         fetch_and_save(
             api_context,
             f"/api/reports/employer/{employer_id}/by_week",
             by_week_params,
-            out_dir / f"by_week_{selected_month}.json",
+            out_dir / f"by_week_{period_label}.json",
         )
 
-        # 5) by_day (Monatszeitraum, aber frühestens ab EARLIEST_DAILY_DATE)
-        month_start_dt = datetime.strptime(month_start, "%Y-%m-%d").date()
-        month_end_dt = datetime.strptime(month_end, "%Y-%m-%d").date()
+        # 5) by_day (Zeitraum last 30 days, aber frühestens ab EARLIEST_DAILY_DATE)
+        period_start_dt = datetime.strptime(period_start, "%Y-%m-%d").date()
+        period_end_dt = datetime.strptime(period_end, "%Y-%m-%d").date()
 
-        daily_start_dt = max(month_start_dt, EARLIEST_DAILY_DATE)
-        daily_end_dt = month_end_dt
+        daily_start_dt = max(period_start_dt, EARLIEST_DAILY_DATE)
+        daily_end_dt = period_end_dt
 
         if daily_start_dt <= daily_end_dt:
             daily_start = daily_start_dt.strftime("%Y-%m-%d")
             daily_end = daily_end_dt.strftime("%Y-%m-%d")
+            daily_label = f"{daily_start}_to_{daily_end}"
 
             by_day_params = {
                 **common,
                 "start_date": daily_start,
                 "end_date": daily_end,
             }
-            by_day_path = out_dir / f"by_day_{selected_month}.json"
+            by_day_path = out_dir / f"by_day_{daily_label}.json"
             by_day_data = fetch_and_save(
                 api_context,
                 f"/api/reports/employer/{employer_id}/by_day",
@@ -385,14 +407,15 @@ def fetch_all_reports(cfg):
             )
         else:
             print(
-                f"Überspringe by_day: Monat {selected_month} liegt vollständig vor "
-                f"dem Startdatum für Tagesdaten ({EARLIEST_DAILY_DATE})."
+                f"Überspringe by_day: Zeitraum {period_start} bis {period_end} "
+                f"liegt vollständig vor dem Startdatum für Tagesdaten "
+                f"({EARLIEST_DAILY_DATE})."
             )
 
-        # 6) by_source_index (job_board-spezifisch, Monatszeitraum)
+        # 6) by_source_index (job_board-spezifisch, Zeitraum last 30 days)
         source_params = {
-            "start_date": month_start,
-            "end_date": month_end,
+            "start_date": period_start,
+            "end_date": period_end,
             "status[]": STATUSES,
             "traffic": "all",
             "job_group_stats_source": "data",
@@ -405,10 +428,10 @@ def fetch_all_reports(cfg):
             api_context,
             f"/api/reports/employer/{employer_id}/by_source_index",
             source_params,
-            out_dir / f"by_source_index_{selected_month}.json",
+            out_dir / f"by_source_index_{period_label}.json",
         )
 
-        # 7) tiles_by_day (Dashboard-Kacheln pro Tag, clientseitig ab EARLIEST_DAILY_DATE gefiltert)
+        # 7) tiles_by_day (Dashboard-Kacheln pro Tag – weiterhin monatsbasiert)
         tiles_params = {
             "selected_month": selected_month,
             "job_board_id": cfg["tiles_job_board_id"],
@@ -427,11 +450,12 @@ def fetch_all_reports(cfg):
 
 def main():
     cfg = get_config()
+    period_start, period_end = last_n_days_range(30)
     print(
         f"Starte Appcast-Scraper für Employer {cfg['employer_id']} "
-        f"und Monat {cfg['selected_month']} …"
+        f"für Zeitraum {period_start} bis {period_end} (letzte 30 Tage inkl. heute)…"
     )
-    fetch_all_reports(cfg)
+    fetch_all_reports(cfg, period_start, period_end)
 
 
 if __name__ == "__main__":
