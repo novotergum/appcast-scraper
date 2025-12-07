@@ -14,6 +14,9 @@ DEFAULT_EMPLOYER_ID = "27620"
 # Zustände, die du auch in den URLs hattest
 STATUSES = ["sponsored", "unsponsored", "expired", "aggregated", "suspended"]
 
+# Frühestes Datum, ab dem Tagesdaten verfügbar sind
+EARLIEST_DAILY_DATE = datetime(2025, 11, 17).date()
+
 
 def previous_month_yyyy_mm() -> str:
     """Gibt den Vormonat im Format YYYY-MM zurück."""
@@ -126,8 +129,10 @@ def login_with_playwright(pw, cfg):
     return browser, context
 
 
-def fetch_and_save(api_context, url_path: str, params: dict, out_file: Path):
-    """Hilfsfunktion: Request bauen, GET ausführen, JSON speichern."""
+def fetch_and_save(api_context, url_path: str, params: dict, out_file: Path, postprocess=None):
+    """
+    Hilfsfunktion: Request bauen, GET ausführen, JSON (optional transformiert) speichern.
+    """
     query = urlencode(params, doseq=True)
     full_url = f"{url_path}?{query}" if query else url_path
 
@@ -140,9 +145,76 @@ def fetch_and_save(api_context, url_path: str, params: dict, out_file: Path):
         )
 
     data = resp.json()
+
+    if postprocess is not None:
+        data = postprocess(data)
+
     out_file.parent.mkdir(parents=True, exist_ok=True)
     out_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
     print(f"Gespeichert unter: {out_file.resolve()}")
+
+
+def filter_tiles_by_day_from_earliest(data):
+    """
+    Filtert tiles_by_day-Daten so, dass nur Einträge mit date >= EARLIEST_DAILY_DATE
+    übrig bleiben. Wir fassen die Struktur möglichst generisch an:
+    - Wenn Top-Level eine Liste von Dicts mit 'date' ist → Liste filtern.
+    - Wenn Top-Level ein Dict mit einer List von Dicts mit 'date' ist → diese Liste filtern.
+    Andernfalls wird data unverändert zurückgegeben.
+    """
+
+    def parse_date(value: str):
+        try:
+            # Schneide ggf. Zeitanteil ab
+            return datetime.strptime(value[:10], "%Y-%m-%d").date()
+        except Exception:
+            return None
+
+    # Fall 1: Top-Level-Liste
+    if isinstance(data, list):
+        filtered = []
+        for item in data:
+            if isinstance(item, dict) and "date" in item:
+                d = parse_date(item.get("date", ""))
+                if d and d >= EARLIEST_DAILY_DATE:
+                    filtered.append(item)
+            else:
+                # falls doch andere Strukturen vorkommen, behalten wir sie
+                filtered.append(item)
+        print(
+            f"tiles_by_day: Filter auf >= {EARLIEST_DAILY_DATE}, "
+            f"{len(data)} → {len(filtered)} Einträge"
+        )
+        return filtered
+
+    # Fall 2: Top-Level-Dict mit Liste(n)
+    if isinstance(data, dict):
+        modified = False
+        for key, val in list(data.items()):
+            if isinstance(val, list) and val:
+                # Prüfe, ob es eine Liste von Dicts mit 'date' ist
+                sample = next((v for v in val if isinstance(v, dict)), None)
+                if sample and "date" in sample:
+                    original_len = len(val)
+                    new_list = []
+                    for item in val:
+                        if isinstance(item, dict) and "date" in item:
+                            d = parse_date(item.get("date", ""))
+                            if d and d >= EARLIEST_DAILY_DATE:
+                                new_list.append(item)
+                        else:
+                            new_list.append(item)
+                    data[key] = new_list
+                    modified = True
+                    print(
+                        f"tiles_by_day[{key}]: Filter auf >= {EARLIEST_DAILY_DATE}, "
+                        f"{original_len} → {len(new_list)} Einträge"
+                    )
+        if modified:
+            return data
+
+    # Fallback: nichts verändert
+    return data
 
 
 def fetch_all_reports(cfg):
@@ -227,18 +299,33 @@ def fetch_all_reports(cfg):
             out_dir / f"by_week_{selected_month}.json",
         )
 
-        # 5) by_day (Monatszeitraum)
-        by_day_params = {
-            **common,
-            "start_date": month_start,
-            "end_date": month_end,
-        }
-        fetch_and_save(
-            api_context,
-            f"/api/reports/employer/{employer_id}/by_day",
-            by_day_params,
-            out_dir / f"by_day_{selected_month}.json",
-        )
+        # 5) by_day (Monatszeitraum, aber frühestens ab EARLIEST_DAILY_DATE)
+        month_start_dt = datetime.strptime(month_start, "%Y-%m-%d").date()
+        month_end_dt = datetime.strptime(month_end, "%Y-%m-%d").date()
+
+        daily_start_dt = max(month_start_dt, EARLIEST_DAILY_DATE)
+        daily_end_dt = month_end_dt
+
+        if daily_start_dt <= daily_end_dt:
+            daily_start = daily_start_dt.strftime("%Y-%m-%d")
+            daily_end = daily_end_dt.strftime("%Y-%m-%d")
+
+            by_day_params = {
+                **common,
+                "start_date": daily_start,
+                "end_date": daily_end,
+            }
+            fetch_and_save(
+                api_context,
+                f"/api/reports/employer/{employer_id}/by_day",
+                by_day_params,
+                out_dir / f"by_day_{selected_month}.json",
+            )
+        else:
+            print(
+                f"Überspringe by_day: Monat {selected_month} liegt vollständig vor "
+                f"dem Startdatum für Tagesdaten ({EARLIEST_DAILY_DATE})."
+            )
 
         # 6) by_source_index (job_board-spezifisch, Monatszeitraum)
         source_params = {
@@ -259,7 +346,7 @@ def fetch_all_reports(cfg):
             out_dir / f"by_source_index_{selected_month}.json",
         )
 
-        # 7) tiles_by_day (Dashboard-Kacheln pro Tag)
+        # 7) tiles_by_day (Dashboard-Kacheln pro Tag, clientseitig ab EARLIEST_DAILY_DATE gefiltert)
         tiles_params = {
             "selected_month": selected_month,
             "job_board_id": cfg["tiles_job_board_id"],
@@ -269,6 +356,7 @@ def fetch_all_reports(cfg):
             f"/api/dashboards/employer/{employer_id}/tiles_by_day",
             tiles_params,
             out_dir / f"tiles_by_day_{selected_month}.json",
+            postprocess=filter_tiles_by_day_from_earliest,
         )
 
         api_context.dispose()
