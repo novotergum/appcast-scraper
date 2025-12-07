@@ -1,11 +1,7 @@
 name: Appcast hero_metrics (Python)
 
 on:
-  workflow_dispatch:
-    inputs:
-      month:
-        description: "Monat im Format YYYY-MM (leer = Vormonat)"
-        required: false
+  workflow_dispatch: {}   # manuell startbar, keine Inputs mehr
 
 jobs:
   scrape-hero-metrics:
@@ -15,7 +11,8 @@ jobs:
       APPCAST_EMAIL: ${{ secrets.APPCAST_EMAIL }}
       APPCAST_PASSWORD: ${{ secrets.APPCAST_PASSWORD }}
       APPCAST_EMPLOYER_ID: ${{ secrets.APPCAST_EMPLOYER_ID }}
-      APPCAST_SELECTED_MONTH: ${{ github.event.inputs.month }}
+      # Webhook aus Repository-Variable (Settings → Secrets and variables → Actions → Variables)
+      APPCAST_HOOK: ${{ vars.APPCAST_HOOK }}
 
     steps:
       - name: Checkout repo
