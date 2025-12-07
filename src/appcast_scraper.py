@@ -34,15 +34,19 @@ def month_start_end(selected_month: str) -> tuple[str, str]:
     return start, end
 
 
-def last_n_days_range(n: int) -> tuple[str, str]:
+def last_calendar_week_range() -> tuple[str, str]:
     """
-    Liefert einen Datumsbereich der letzten n Tage einschließlich heute
-    im Format (start_date, end_date) als YYYY-MM-DD.
+    Liefert die letzte vollständige Kalenderwoche (Montag–Sonntag)
+    relativ zu heute (UTC) als (start_date, end_date) im Format YYYY-MM-DD.
+
+    Beispiel: Aufruf am Montag, 2025-12-08
+    → Ergebnis: 2025-12-01 (Mo) bis 2025-12-07 (So).
     """
     today = datetime.utcnow().date()
-    end_date = today
-    start_date = end_date - timedelta(days=n - 1)
-    return start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")
+    this_monday = today - timedelta(days=today.weekday())  # 0 = Montag
+    last_monday = this_monday - timedelta(days=7)
+    last_sunday = this_monday - timedelta(days=1)
+    return last_monday.strftime("%Y-%m-%d"), last_sunday.strftime("%Y-%m-%d")
 
 
 def get_config():
@@ -57,7 +61,7 @@ def get_config():
 
     employer_id = os.getenv("APPCAST_EMPLOYER_ID", DEFAULT_EMPLOYER_ID)
     # Für hero_metrics / tiles_by_day weiterhin ein Monats-Parameter,
-    # aber alle Report-„start_date“/„end_date“-Ranges werden auf die letzten 30 Tage gesetzt.
+    # alle date-basierten Reports werden über period_start/period_end gesteuert.
     selected_month = current_month_yyyy_mm()
 
     job_board_ids_raw = os.getenv("APPCAST_JOB_BOARD_IDS", "")
@@ -284,7 +288,7 @@ def send_by_day_to_webhook(
 def fetch_all_reports(cfg, period_start: str, period_end: str):
     """
     Holt alle Reports für einen beliebigen Datumsbereich period_start/period_end
-    (YYYY-MM-DD). Die meisten Endpunkte werden auf diesen Bereich gesetzt.
+    (YYYY-MM-DD). Typischer Use Case hier: letzte Kalenderwoche (Mo–So).
     hero_metrics / tiles_by_day bleiben monatsbasiert.
     """
     selected_month = cfg["selected_month"]
@@ -340,7 +344,7 @@ def fetch_all_reports(cfg, period_start: str, period_end: str):
             out_dir / f"by_month_{year}.json",
         )
 
-        # 3) by_dynamic_field (tagged_category_id, Zeitraum last 30 days)
+        # 3) by_dynamic_field (tagged_category_id, Zeitraum period_start–period_end)
         by_dyn_params = {
             **common,
             "pjg": "false",
@@ -359,7 +363,7 @@ def fetch_all_reports(cfg, period_start: str, period_end: str):
             / f"by_dynamic_field_tagged_category_{period_label}.json",
         )
 
-        # 4) by_week (Zeitraum last 30 days)
+        # 4) by_week (Zeitraum period_start–period_end, typischerweise eine Woche)
         by_week_params = {
             **common,
             "start_date": period_start,
@@ -372,7 +376,7 @@ def fetch_all_reports(cfg, period_start: str, period_end: str):
             out_dir / f"by_week_{period_label}.json",
         )
 
-        # 5) by_day (Zeitraum last 30 days, aber frühestens ab EARLIEST_DAILY_DATE)
+        # 5) by_day (Zeitraum period_start–period_end, aber frühestens ab EARLIEST_DAILY_DATE)
         period_start_dt = datetime.strptime(period_start, "%Y-%m-%d").date()
         period_end_dt = datetime.strptime(period_end, "%Y-%m-%d").date()
 
@@ -412,7 +416,7 @@ def fetch_all_reports(cfg, period_start: str, period_end: str):
                 f"({EARLIEST_DAILY_DATE})."
             )
 
-        # 6) by_source_index (job_board-spezifisch, Zeitraum last 30 days)
+        # 6) by_source_index (job_board-spezifisch, Zeitraum period_start–period_end)
         source_params = {
             "start_date": period_start,
             "end_date": period_end,
@@ -450,10 +454,10 @@ def fetch_all_reports(cfg, period_start: str, period_end: str):
 
 def main():
     cfg = get_config()
-    period_start, period_end = last_n_days_range(30)
+    period_start, period_end = last_calendar_week_range()
     print(
         f"Starte Appcast-Scraper für Employer {cfg['employer_id']} "
-        f"für Zeitraum {period_start} bis {period_end} (letzte 30 Tage inkl. heute)…"
+        f"für Zeitraum {period_start} bis {period_end} (letzte Kalenderwoche Mo–So)…"
     )
     fetch_all_reports(cfg, period_start, period_end)
 
