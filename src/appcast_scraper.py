@@ -399,7 +399,7 @@ def fetch_all_reports(cfg):
         }
         if cfg["job_board_ids"]:
             # job_boards[]=ac-571&job_boards[]=...
-            source_params["job_boords[]"] = cfg["job_board_ids"]
+            source_params["job_boards[]"] = cfg["job_board_ids"]
 
         fetch_and_save(
             api_context,
