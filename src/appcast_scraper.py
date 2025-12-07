@@ -6,6 +6,7 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 from playwright.sync_api import sync_playwright
+import requests  # für den Make-Webhook
 
 BASE_URL = "https://appcast-de.appcast.io"
 LOGIN_URL = f"{BASE_URL}/cc/user-sessions/login"
@@ -18,12 +19,10 @@ STATUSES = ["sponsored", "unsponsored", "expired", "aggregated", "suspended"]
 EARLIEST_DAILY_DATE = datetime(2025, 11, 17).date()
 
 
-def previous_month_yyyy_mm() -> str:
-    """Gibt den Vormonat im Format YYYY-MM zurück."""
+def current_month_yyyy_mm() -> str:
+    """Gibt den aktuellen Monat im Format YYYY-MM zurück (basierend auf UTC)."""
     today = datetime.utcnow()
-    first_of_this_month = today.replace(day=1)
-    last_day_prev_month = first_of_this_month - timedelta(days=1)
-    return f"{last_day_prev_month.year}-{last_day_prev_month.month:02d}"
+    return f"{today.year}-{today.month:02d}"
 
 
 def month_start_end(selected_month: str) -> tuple[str, str]:
@@ -46,7 +45,8 @@ def get_config():
         )
 
     employer_id = os.getenv("APPCAST_EMPLOYER_ID", DEFAULT_EMPLOYER_ID)
-    selected_month = os.getenv("APPCAST_SELECTED_MONTH") or previous_month_yyyy_mm()
+    # Immer aktueller Monat, kein Override per Umgebungsvariable
+    selected_month = current_month_yyyy_mm()
 
     job_board_ids_raw = os.getenv("APPCAST_JOB_BOARD_IDS", "")
     job_board_ids = [
@@ -132,6 +132,7 @@ def login_with_playwright(pw, cfg):
 def fetch_and_save(api_context, url_path: str, params: dict, out_file: Path, postprocess=None):
     """
     Hilfsfunktion: Request bauen, GET ausführen, JSON (optional transformiert) speichern.
+    Gibt die (ggf. postprozessierten) Daten zurück.
     """
     query = urlencode(params, doseq=True)
     full_url = f"{url_path}?{query}" if query else url_path
@@ -152,6 +153,8 @@ def fetch_and_save(api_context, url_path: str, params: dict, out_file: Path, pos
     out_file.parent.mkdir(parents=True, exist_ok=True)
     out_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
     print(f"Gespeichert unter: {out_file.resolve()}")
+
+    return data
 
 
 def filter_tiles_by_day_from_earliest(data):
@@ -215,6 +218,55 @@ def filter_tiles_by_day_from_earliest(data):
 
     # Fallback: nichts verändert
     return data
+
+
+def get_appcast_hook_url() -> str | None:
+    """
+    Ermittelt die Webhook-URL aus der Umgebung:
+    - 'appcast_hook' (klein) oder
+    - 'APPCAST_HOOK' (groß)
+    Kein Fallback im Code.
+    """
+    env_url = os.getenv("appcast_hook") or os.getenv("APPCAST_HOOK")
+    if env_url:
+        return env_url.strip()
+    return None
+
+
+def send_by_day_to_webhook(
+    employer_id: str,
+    selected_month: str,
+    start_date: str,
+    end_date: str,
+    report: dict,
+):
+    """
+    Schickt den by_day-Report als JSON an den Make-Webhook.
+    Wenn kein Webhook gesetzt ist, wird stillschweigend übersprungen.
+    Fehler beim Aufruf brechen den Scraper nicht ab.
+    """
+    hook_url = get_appcast_hook_url()
+    if not hook_url:
+        print("Kein appcast_hook / APPCAST_HOOK gesetzt – Webhook wird übersprungen.")
+        return
+
+    payload = {
+        "employer_id": employer_id,
+        "selected_month": selected_month,
+        "start_date": start_date,
+        "end_date": end_date,
+        "report_type": "by_day",
+        "timestamp_utc": datetime.utcnow().isoformat(),
+        "report": report,
+    }
+
+    print(f"Sende by_day-Report an Webhook {hook_url} …")
+    try:
+        resp = requests.post(hook_url, json=payload, timeout=20)
+        resp.raise_for_status()
+        print(f"Webhook erfolgreich: HTTP {resp.status_code}")
+    except Exception as e:
+        print(f"Fehler beim Senden an Webhook: {e}")
 
 
 def fetch_all_reports(cfg):
@@ -315,11 +367,21 @@ def fetch_all_reports(cfg):
                 "start_date": daily_start,
                 "end_date": daily_end,
             }
-            fetch_and_save(
+            by_day_path = out_dir / f"by_day_{selected_month}.json"
+            by_day_data = fetch_and_save(
                 api_context,
                 f"/api/reports/employer/{employer_id}/by_day",
                 by_day_params,
-                out_dir / f"by_day_{selected_month}.json",
+                by_day_path,
+            )
+
+            # Webhook mit by_day-Report triggern
+            send_by_day_to_webhook(
+                employer_id=employer_id,
+                selected_month=selected_month,
+                start_date=daily_start,
+                end_date=daily_end,
+                report=by_day_data,
             )
         else:
             print(
@@ -337,7 +399,7 @@ def fetch_all_reports(cfg):
         }
         if cfg["job_board_ids"]:
             # job_boards[]=ac-571&job_boards[]=...
-            source_params["job_boards[]"] = cfg["job_board_ids"]
+            source_params["job_boords[]"] = cfg["job_board_ids"]
 
         fetch_and_save(
             api_context,
