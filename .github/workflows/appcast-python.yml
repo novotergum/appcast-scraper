@@ -1,7 +1,9 @@
 name: Appcast hero_metrics (Python)
 
 on:
-  workflow_dispatch: {}   # manuell startbar, keine Inputs mehr
+  workflow_dispatch: {}   # weiterhin manuell startbar
+  schedule:
+    - cron: "0 5 * * 1"   # jeden Montag um 05:00 UTC
 
 jobs:
   scrape-hero-metrics:
