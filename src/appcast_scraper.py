@@ -38,6 +38,9 @@ def last_calendar_week_range() -> tuple[str, str]:
     """
     Liefert die letzte vollständige Kalenderwoche (Montag–Sonntag)
     relativ zu heute (UTC) als (start_date, end_date) im Format YYYY-MM-DD.
+
+    Beispiel: Aufruf am Montag, 2025-12-08
+    → Ergebnis: 2025-12-01 (Mo) bis 2025-12-07 (So).
     """
     today = datetime.utcnow().date()
     this_monday = today - timedelta(days=today.weekday())  # 0 = Montag
@@ -142,7 +145,13 @@ def login_with_playwright(pw, cfg):
     return browser, context
 
 
-def fetch_and_save(api_context, url_path: str, params: dict, out_file: Path, postprocess=None):
+def fetch_and_save(
+    api_context,
+    url_path: str,
+    params: dict,
+    out_file: Path,
+    postprocess=None,
+):
     """
     Hilfsfunktion: Request bauen, GET ausführen, JSON (optional transformiert) speichern.
     Gibt die (ggf. postprozessierten) Daten zurück.
@@ -240,17 +249,22 @@ def get_appcast_hook_url() -> str | None:
     return None
 
 
-def send_by_day_to_webhook(
+def send_report_to_webhook(
     employer_id: str,
     selected_month: str,
     start_date: str,
     end_date: str,
+    report_type: str,
     report: dict,
+    **extra_meta,
 ):
     """
-    Schickt den by_day-Report als JSON an den Make-Webhook.
-    Wenn kein Webhook gesetzt ist, wird stillschweigend übersprungen.
-    Fehler beim Aufruf brechen den Scraper nicht ab.
+    Generischer Webhook-Sender für verschiedene Reporttypen.
+
+    Beispiele:
+    - report_type="by_day"
+    - report_type="by_dynamic_field", dynamic_field="title"
+    - report_type="by_dynamic_field", dynamic_field="city"
     """
     hook_url = get_appcast_hook_url()
     if not hook_url:
@@ -262,12 +276,13 @@ def send_by_day_to_webhook(
         "selected_month": selected_month,
         "start_date": start_date,
         "end_date": end_date,
-        "report_type": "by_day",
+        "report_type": report_type,
         "timestamp_utc": datetime.utcnow().isoformat(),
         "report": report,
     }
+    payload.update(extra_meta)
 
-    print(f"Sende by_day-Report an Webhook {hook_url} …")
+    print(f"Sende Report '{report_type}' an Webhook {hook_url} …")
     try:
         resp = requests.post(hook_url, json=payload, timeout=20)
         resp.raise_for_status()
@@ -366,7 +381,7 @@ def fetch_all_reports(cfg, period_start: str, period_end: str):
             "job_group_status": "all",
             "sort": "spent-desc",
         }
-        fetch_and_save(
+        by_dyn_title_data = fetch_and_save(
             api_context,
             f"/api/reports/employer/{employer_id}/by_dynamic_field",
             by_dyn_title_params,
@@ -385,7 +400,7 @@ def fetch_all_reports(cfg, period_start: str, period_end: str):
             "job_group_status": "all",
             "sort": "spent-desc",
         }
-        fetch_and_save(
+        by_dyn_city_data = fetch_and_save(
             api_context,
             f"/api/reports/employer/{employer_id}/by_dynamic_field",
             by_dyn_city_params,
@@ -431,11 +446,12 @@ def fetch_all_reports(cfg, period_start: str, period_end: str):
             )
 
             # Webhook mit by_day-Report triggern
-            send_by_day_to_webhook(
+            send_report_to_webhook(
                 employer_id=employer_id,
                 selected_month=selected_month,
                 start_date=daily_start,
                 end_date=daily_end,
+                report_type="by_day",
                 report=by_day_data,
             )
         else:
@@ -444,6 +460,28 @@ def fetch_all_reports(cfg, period_start: str, period_end: str):
                 f"liegt vollständig vor dem Startdatum für Tagesdaten "
                 f"({EARLIEST_DAILY_DATE})."
             )
+
+        # Webhook für by_dynamic_field(title)
+        send_report_to_webhook(
+            employer_id=employer_id,
+            selected_month=selected_month,
+            start_date=period_start,
+            end_date=period_end,
+            report_type="by_dynamic_field",
+            report=by_dyn_title_data,
+            dynamic_field="title",
+        )
+
+        # Webhook für by_dynamic_field(city)
+        send_report_to_webhook(
+            employer_id=employer_id,
+            selected_month=selected_month,
+            start_date=period_start,
+            end_date=period_end,
+            report_type="by_dynamic_field",
+            report=by_dyn_city_data,
+            dynamic_field="city",
+        )
 
         # 6) by_source_index (job_board-spezifisch, Zeitraum period_start–period_end)
         source_params = {
