@@ -38,9 +38,6 @@ def last_calendar_week_range() -> tuple[str, str]:
     """
     Liefert die letzte vollständige Kalenderwoche (Montag–Sonntag)
     relativ zu heute (UTC) als (start_date, end_date) im Format YYYY-MM-DD.
-
-    Beispiel: Aufruf am Montag, 2025-12-08
-    → Ergebnis: 2025-12-01 (Mo) bis 2025-12-07 (So).
     """
     today = datetime.utcnow().date()
     this_monday = today - timedelta(days=today.weekday())  # 0 = Montag
@@ -176,10 +173,7 @@ def fetch_and_save(api_context, url_path: str, params: dict, out_file: Path, pos
 def filter_tiles_by_day_from_earliest(data):
     """
     Filtert tiles_by_day-Daten so, dass nur Einträge mit date >= EARLIEST_DAILY_DATE
-    übrig bleiben. Wir fassen die Struktur möglichst generisch an:
-    - Wenn Top-Level eine Liste von Dicts mit 'date' ist → Liste filtern.
-    - Wenn Top-Level ein Dict mit einer List von Dicts mit 'date' ist → diese Liste filtern.
-    Andernfalls wird data unverändert zurückgegeben.
+    übrig bleiben.
     """
 
     def parse_date(value: str):
@@ -198,7 +192,6 @@ def filter_tiles_by_day_from_earliest(data):
                 if d and d >= EARLIEST_DAILY_DATE:
                     filtered.append(item)
             else:
-                # falls doch andere Strukturen vorkommen, behalten wir sie
                 filtered.append(item)
         print(
             f"tiles_by_day: Filter auf >= {EARLIEST_DAILY_DATE}, "
@@ -211,7 +204,6 @@ def filter_tiles_by_day_from_earliest(data):
         modified = False
         for key, val in list(data.items()):
             if isinstance(val, list) and val:
-                # Prüfe, ob es eine Liste von Dicts mit 'date' ist
                 sample = next((v for v in val if isinstance(v, dict)), None)
                 if sample and "date" in sample:
                     original_len = len(val)
@@ -232,7 +224,6 @@ def filter_tiles_by_day_from_earliest(data):
         if modified:
             return data
 
-    # Fallback: nichts verändert
     return data
 
 
@@ -361,6 +352,44 @@ def fetch_all_reports(cfg, period_start: str, period_end: str):
             by_dyn_params,
             out_dir
             / f"by_dynamic_field_tagged_category_{period_label}.json",
+        )
+
+        # 3b) by_dynamic_field (title, Zeitraum period_start–period_end, sortiert nach Spend)
+        by_dyn_title_params = {
+            **common,
+            "pjg": "false",
+            "selected_month": selected_month,
+            "dynamic_field": "title",
+            "start_date": period_start,
+            "end_date": period_end,
+            "per_page": 100,
+            "job_group_status": "all",
+            "sort": "spent-desc",
+        }
+        fetch_and_save(
+            api_context,
+            f"/api/reports/employer/{employer_id}/by_dynamic_field",
+            by_dyn_title_params,
+            out_dir / f"by_dynamic_field_title_{period_label}.json",
+        )
+
+        # 3c) by_dynamic_field (city, Zeitraum period_start–period_end, sortiert nach Spend)
+        by_dyn_city_params = {
+            **common,
+            "pjg": "false",
+            "selected_month": selected_month,
+            "dynamic_field": "city",
+            "start_date": period_start,
+            "end_date": period_end,
+            "per_page": 100,
+            "job_group_status": "all",
+            "sort": "spent-desc",
+        }
+        fetch_and_save(
+            api_context,
+            f"/api/reports/employer/{employer_id}/by_dynamic_field",
+            by_dyn_city_params,
+            out_dir / f"by_dynamic_field_city_{period_label}.json",
         )
 
         # 4) by_week (Zeitraum period_start–period_end, typischerweise eine Woche)
