@@ -19,6 +19,28 @@ STATUSES = ["sponsored", "unsponsored", "expired", "aggregated", "suspended"]
 EARLIEST_DAILY_DATE = datetime(2025, 11, 17).date()
 
 
+def localize_decimals_for_de(obj):
+    """
+    Konvertiert alle int/float-Werte in Strings mit deutschem Dezimaltrennzeichen.
+    Beispiel: 5.83 -> "5,83"
+
+    Wichtig:
+    - Struktur (Dicts/Listen) bleibt erhalten.
+    - Nur Zahlen werden verändert, alle anderen Typen bleiben unverändert.
+    """
+    if isinstance(obj, dict):
+        return {k: localize_decimals_for_de(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [localize_decimals_for_de(v) for v in obj]
+    if isinstance(obj, (int, float)):
+        # 2 Nachkommastellen, Trailing-Nullen optional abschneiden
+        s = f"{obj:.2f}"
+        if "." in s:
+            s = s.rstrip("0").rstrip(".")
+        return s.replace(".", ",")
+    return obj
+
+
 def current_month_yyyy_mm() -> str:
     """Gibt den aktuellen Monat im Format YYYY-MM zurück (basierend auf UTC)."""
     today = datetime.utcnow()
@@ -265,11 +287,16 @@ def send_report_to_webhook(
     - report_type="by_day"
     - report_type="by_dynamic_field", dynamic_field="title"
     - report_type="by_dynamic_field", dynamic_field="city"
+
+    Alle Zahlen werden vor dem Senden in deutsche Schreibweise konvertiert
+    (5.83 → "5,83"), damit sie in Google Sheets / Make als Strings mit Komma ankommen.
     """
     hook_url = get_appcast_hook_url()
     if not hook_url:
         print("Kein appcast_hook / APPCAST_HOOK gesetzt – Webhook wird übersprungen.")
         return
+
+    localized_report = localize_decimals_for_de(report)
 
     payload = {
         "employer_id": employer_id,
@@ -278,7 +305,7 @@ def send_report_to_webhook(
         "end_date": end_date,
         "report_type": report_type,
         "timestamp_utc": datetime.utcnow().isoformat(),
-        "report": report,
+        "report": localized_report,
     }
     payload.update(extra_meta)
 
@@ -445,7 +472,7 @@ def fetch_all_reports(cfg, period_start: str, period_end: str):
                 by_day_path,
             )
 
-            # Webhook mit by_day-Report triggern
+            # Webhook mit by_day-Report (mit DE-Lokalisierung) triggern
             send_report_to_webhook(
                 employer_id=employer_id,
                 selected_month=selected_month,
@@ -461,7 +488,7 @@ def fetch_all_reports(cfg, period_start: str, period_end: str):
                 f"({EARLIEST_DAILY_DATE})."
             )
 
-        # Webhook für by_dynamic_field(title)
+        # Webhook für by_dynamic_field(title) – mit lokalisierter Dezimalschreibweise
         send_report_to_webhook(
             employer_id=employer_id,
             selected_month=selected_month,
@@ -472,7 +499,7 @@ def fetch_all_reports(cfg, period_start: str, period_end: str):
             dynamic_field="title",
         )
 
-        # Webhook für by_dynamic_field(city)
+        # Webhook für by_dynamic_field(city) – mit lokalisierter Dezimalschreibweise
         send_report_to_webhook(
             employer_id=employer_id,
             selected_month=selected_month,
