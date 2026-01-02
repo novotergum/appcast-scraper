@@ -12,13 +12,11 @@ BASE_URL = "https://appcast-de.appcast.io"
 LOGIN_URL = f"{BASE_URL}/cc/user-sessions/login"
 DEFAULT_EMPLOYER_ID = "27620"
 
-# Zustände, die du auch in den URLs hattest
 STATUSES = ["sponsored", "unsponsored", "expired", "aggregated", "suspended"]
 
-# Frühestes Datum, ab dem Tagesdaten verfügbar sind
 EARLIEST_DAILY_DATE = datetime(2025, 11, 17).date()
 
-# Optional: zusätzlich zu "flat_rows" im by_day Payload (empfohlen für Make Iterator)
+# Für Make Iterator: flat_rows ist i.d.R. die beste Struktur
 INCLUDE_FLAT_ROWS = True
 
 
@@ -40,27 +38,16 @@ def localize_decimals_for_de(obj):
 
 
 def current_month_yyyy_mm() -> str:
-    """Gibt den aktuellen Monat im Format YYYY-MM zurück (basierend auf UTC)."""
     today = datetime.utcnow()
     return f"{today.year}-{today.month:02d}"
 
 
-def month_start_end(selected_month: str) -> tuple[str, str]:
-    """Ermittelt ersten und letzten Tag des Monats im Format YYYY-MM-DD."""
-    year, month = map(int, selected_month.split("-"))
-    last_day = calendar.monthrange(year, month)[1]
-    start = f"{year}-{month:02d}-01"
-    end = f"{year}-{month:02d}-{last_day:02d}"
-    return start, end
-
-
 def last_calendar_week_range() -> tuple[str, str]:
     """
-    Liefert die letzte vollständige Kalenderwoche (Montag–Sonntag)
-    relativ zu heute (UTC) als (start_date, end_date) im Format YYYY-MM-DD.
+    Letzte vollständige Kalenderwoche (Mo–So) relativ zu heute (UTC).
     """
     today = datetime.utcnow().date()
-    this_monday = today - timedelta(days=today.weekday())  # 0 = Montag
+    this_monday = today - timedelta(days=today.weekday())
     last_monday = this_monday - timedelta(days=7)
     last_sunday = this_monday - timedelta(days=1)
     return last_monday.strftime("%Y-%m-%d"), last_sunday.strftime("%Y-%m-%d")
@@ -69,7 +56,6 @@ def last_calendar_week_range() -> tuple[str, str]:
 def get_config():
     email = os.getenv("APPCAST_EMAIL")
     password = os.getenv("APPCAST_PASSWORD")
-
     if not email or not password:
         raise RuntimeError(
             "APPCAST_EMAIL und/oder APPCAST_PASSWORD sind nicht gesetzt. "
@@ -95,7 +81,6 @@ def get_config():
 
 
 def build_common_report_params() -> dict:
-    """Gemeinsame Parameter für by_month / by_day / by_week / by_dynamic_field."""
     return {
         "devise": "all",
         "job_group_stats_source": "data",
@@ -114,11 +99,6 @@ def build_common_report_params() -> dict:
 
 
 def login_with_playwright(pw, cfg):
-    """
-    Zweistufiger Login:
-    1) E-Mail eingeben, Log In klicken
-    2) Passwortfeld abwarten, Passwort eingeben, erneut Log In klicken
-    """
     browser = pw.chromium.launch(headless=True)
     context = browser.new_context()
     page = context.new_page()
@@ -155,10 +135,6 @@ def login_with_playwright(pw, cfg):
 
 
 def fetch_and_save(api_context, url_path: str, params: dict, out_file: Path, postprocess=None):
-    """
-    Hilfsfunktion: Request bauen, GET ausführen, JSON (optional transformiert) speichern.
-    Gibt die (ggf. postprozessierten) Daten zurück.
-    """
     query = urlencode(params, doseq=True)
     full_url = f"{url_path}?{query}" if query else url_path
 
@@ -169,7 +145,6 @@ def fetch_and_save(api_context, url_path: str, params: dict, out_file: Path, pos
         raise RuntimeError(f"Request fehlgeschlagen: {resp.status} {resp.status_text()}\n{text}")
 
     data = resp.json()
-
     if postprocess is not None:
         data = postprocess(data)
 
@@ -181,7 +156,6 @@ def fetch_and_save(api_context, url_path: str, params: dict, out_file: Path, pos
 
 
 def filter_tiles_by_day_from_earliest(data):
-    """Filtert tiles_by_day-Daten so, dass nur Einträge mit date >= EARLIEST_DAILY_DATE übrig bleiben."""
     def parse_date(value: str):
         try:
             return datetime.strptime(value[:10], "%Y-%m-%d").date()
@@ -197,7 +171,7 @@ def filter_tiles_by_day_from_earliest(data):
                     filtered.append(item)
             else:
                 filtered.append(item)
-        print(f"tiles_by_day: Filter auf >= {EARLIEST_DAILY_DATE}, {len(data)} → {len(filtered)} Einträge")
+        print(f"tiles_by_day: Filter auf >= {EARLIEST_DAILY_DATE}, {len(data)} → {len(filtered)}")
         return filtered
 
     if isinstance(data, dict):
@@ -217,10 +191,7 @@ def filter_tiles_by_day_from_earliest(data):
                             new_list.append(item)
                     data[key] = new_list
                     modified = True
-                    print(
-                        f"tiles_by_day[{key}]: Filter auf >= {EARLIEST_DAILY_DATE}, "
-                        f"{original_len} → {len(new_list)} Einträge"
-                    )
+                    print(f"tiles_by_day[{key}]: {original_len} → {len(new_list)}")
         if modified:
             return data
 
@@ -228,7 +199,6 @@ def filter_tiles_by_day_from_earliest(data):
 
 
 def get_appcast_hook_url() -> str | None:
-    """Ermittelt die Webhook-URL aus der Umgebung: 'appcast_hook' oder 'APPCAST_HOOK'."""
     env_url = os.getenv("appcast_hook") or os.getenv("APPCAST_HOOK")
     if env_url:
         return env_url.strip()
@@ -245,14 +215,12 @@ def send_report_to_webhook(
     **extra_meta,
 ):
     """
-    Webhook-Sender für range-basierte Reporttypen (by_week, by_dynamic_field, ...).
+    Range-basierte Reports (by_dynamic_field etc.) können start/end behalten.
     """
     hook_url = get_appcast_hook_url()
     if not hook_url:
         print("Kein appcast_hook / APPCAST_HOOK gesetzt – Webhook wird übersprungen.")
         return
-
-    localized_report = localize_decimals_for_de(report)
 
     payload = {
         "employer_id": employer_id,
@@ -261,11 +229,11 @@ def send_report_to_webhook(
         "end_date": end_date,
         "report_type": report_type,
         "timestamp_utc": datetime.utcnow().isoformat(),
-        "report": localized_report,
+        "report": localize_decimals_for_de(report),
     }
     payload.update(extra_meta)
 
-    print(f"Sende Report '{report_type}' an Webhook {hook_url} …")
+    print(f"Sende Report '{report_type}' an Webhook …")
     try:
         resp = requests.post(hook_url, json=payload, timeout=20)
         resp.raise_for_status()
@@ -274,24 +242,20 @@ def send_report_to_webhook(
         print(f"Fehler beim Senden an Webhook: {e}")
 
 
-# ---- by_day: strikt "date" als Metric-Key ----
+# -------- by_day: metric_key = date, Iterator-friendly --------
 
 def extract_by_day_rows(by_day_data) -> list[dict]:
     """
-    Extrahiert aus by_day die rows (strict):
-    { "rows": [ { "date": "YYYY-MM-DD", "job_boards": [...] }, ... ] }
+    Strict: erwartet { "rows": [ { "date": "...", "job_boards": [...] }, ... ] }
     """
     if isinstance(by_day_data, dict) and isinstance(by_day_data.get("rows"), list):
         return [r for r in by_day_data["rows"] if isinstance(r, dict) and "date" in r]
-
     if isinstance(by_day_data, list):
         return [x for x in by_day_data if isinstance(x, dict) and "date" in x]
-
     return []
 
 
 def filter_by_day_rows_to_range(rows: list[dict], start_date: str, end_date: str) -> list[dict]:
-    """Sicherheitsfilter: nur rows innerhalb [start_date, end_date] behalten."""
     try:
         start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
         end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
@@ -314,7 +278,8 @@ def filter_by_day_rows_to_range(rows: list[dict], start_date: str, end_date: str
 
 def flatten_by_day_rows(rows: list[dict]) -> list[dict]:
     """
-    Flatten für Make/Sheets: eine Zeile pro (date × job_board).
+    Eine Zeile pro (date × job_board) für Make Iterator.
+    Nutzt report_date als eindeutigen Key (damit du in Make nicht start_date erwischst).
     """
     flat = []
 
@@ -350,17 +315,18 @@ def flatten_by_day_rows(rows: list[dict]) -> list[dict]:
     ]
 
     for r in rows:
-        date = r.get("date")
+        d = r.get("date")
         job_boards = r.get("job_boards") or []
         if not isinstance(job_boards, list) or not job_boards:
-            flat.append({"date": date})
+            flat.append({"report_date": d, "date": d})
             continue
 
         for jb in job_boards:
             if not isinstance(jb, dict):
                 continue
             row = {
-                "date": date,
+                "report_date": d,   # <-- für Make mappen
+                "date": d,          # <-- optional (falls du Spalten so benannt hast)
                 "job_board_id": jb.get("id"),
                 "job_board_name": jb.get("name"),
                 "currency": jb.get("currency"),
@@ -375,21 +341,10 @@ def flatten_by_day_rows(rows: list[dict]) -> list[dict]:
     return flat
 
 
-def send_by_day_aggregate_to_webhook(
-    employer_id: str,
-    selected_month: str,
-    by_day_data,
-    daily_start: str,
-    daily_end: str,
-):
+def send_by_day_aggregate_to_webhook(employer_id: str, selected_month: str, by_day_data, daily_start: str, daily_end: str):
     """
-    by_day wird im gleichen Turnus wie der Run gesendet (z.B. wöchentlich),
-    aber tagesgranular in EINEM Payload.
-
-    Vorgabe umgesetzt:
-    - Keine start_date/end_date Felder im Payload.
-    - metric_key ist "date".
-    - Iterator in Make kann auf payload["rows"] oder payload["flat_rows"] laufen.
+    by_day wird NICHT täglich gesendet, sondern im gleichen Turnus wie der Run.
+    Payload enthält keine start_date/end_date (damit du es nicht versehentlich mappst).
     """
     hook_url = get_appcast_hook_url()
     if not hook_url:
@@ -404,6 +359,11 @@ def send_by_day_aggregate_to_webhook(
     rows = filter_by_day_rows_to_range(rows, daily_start, daily_end)
     rows = sorted(rows, key=lambda r: r.get("date", ""))
 
+    # Debug: damit du in Logs sofort siehst, ob mehrere Tage drin sind
+    first_d = rows[0].get("date") if rows else None
+    last_d = rows[-1].get("date") if rows else None
+    print(f"by_day: sende {len(rows)} Tage (first={first_d}, last={last_d})")
+
     payload = {
         "employer_id": employer_id,
         "selected_month": selected_month,
@@ -417,7 +377,7 @@ def send_by_day_aggregate_to_webhook(
     if INCLUDE_FLAT_ROWS:
         payload["flat_rows"] = localize_decimals_for_de(flatten_by_day_rows(rows))
 
-    print(f"Sende by_day (tagesgranular, 1 Payload) an Webhook {hook_url} …")
+    print("Sende by_day (1 Payload, tagesgranular) an Webhook …")
     try:
         resp = requests.post(hook_url, json=payload, timeout=20)
         resp.raise_for_status()
@@ -427,15 +387,9 @@ def send_by_day_aggregate_to_webhook(
 
 
 def fetch_all_reports(cfg, period_start: str, period_end: str):
-    """
-    Holt alle Reports für einen beliebigen Datumsbereich period_start/period_end (YYYY-MM-DD).
-    Typischer Use Case: letzte Kalenderwoche (Mo–So).
-    hero_metrics / tiles_by_day bleiben monatsbasiert.
-    """
     selected_month = cfg["selected_month"]
     employer_id = cfg["employer_id"]
 
-    # Jahr anhand des Enddatums bestimmen (für Jahres-Reports)
     year = period_end.split("-")[0]
     year_start = f"{year}-1-1"
     year_end = f"{year}-12-31"
@@ -446,14 +400,11 @@ def fetch_all_reports(cfg, period_start: str, period_end: str):
         browser, context = login_with_playwright(pw, cfg)
 
         state = context.storage_state()
-        api_context = pw.request.new_context(
-            base_url=BASE_URL,
-            storage_state=state,
-        )
+        api_context = pw.request.new_context(base_url=BASE_URL, storage_state=state)
 
         out_dir = Path("data")
 
-        # 1) hero_metrics (monatsbasiert, weiterhin aktueller Monat)
+        # 1) hero_metrics (monatsbasiert)
         hero_params = {
             "selected_month": selected_month,
             "devise": "all",
@@ -471,7 +422,7 @@ def fetch_all_reports(cfg, period_start: str, period_end: str):
 
         common = build_common_report_params()
 
-        # 2) by_month (Jahresübersicht für das Jahr des Enddatums)
+        # 2) by_month (Jahr)
         by_month_params = {**common, "start_month": year_start, "end_month": year_end}
         fetch_and_save(
             api_context,
@@ -545,7 +496,7 @@ def fetch_all_reports(cfg, period_start: str, period_end: str):
             out_dir / f"by_week_{period_label}.json",
         )
 
-        # 5) by_day (Zeitraum period_start–period_end, aber frühestens ab EARLIEST_DAILY_DATE)
+        # 5) by_day (Zeitraum, min. EARLIEST_DAILY_DATE)
         period_start_dt = datetime.strptime(period_start, "%Y-%m-%d").date()
         period_end_dt = datetime.strptime(period_end, "%Y-%m-%d").date()
 
@@ -558,15 +509,14 @@ def fetch_all_reports(cfg, period_start: str, period_end: str):
             daily_label = f"{daily_start}_to_{daily_end}"
 
             by_day_params = {**common, "start_date": daily_start, "end_date": daily_end}
-            by_day_path = out_dir / f"by_day_{daily_label}.json"
             by_day_data = fetch_and_save(
                 api_context,
                 f"/api/reports/employer/{employer_id}/by_day",
                 by_day_params,
-                by_day_path,
+                out_dir / f"by_day_{daily_label}.json",
             )
 
-            # Webhook: by_day (tagesgranular, 1 Payload), metric_key="date", ohne start/end im Payload
+            # Webhook: tagesgranular, aber 1x pro Run; ohne start/end im Payload
             send_by_day_aggregate_to_webhook(
                 employer_id=employer_id,
                 selected_month=selected_month,
@@ -577,10 +527,10 @@ def fetch_all_reports(cfg, period_start: str, period_end: str):
         else:
             print(
                 f"Überspringe by_day: Zeitraum {period_start} bis {period_end} "
-                f"liegt vollständig vor dem Startdatum für Tagesdaten ({EARLIEST_DAILY_DATE})."
+                f"liegt vollständig vor {EARLIEST_DAILY_DATE}."
             )
 
-        # Webhook für by_dynamic_field(title)
+        # Webhooks: by_dynamic_field
         send_report_to_webhook(
             employer_id=employer_id,
             selected_month=selected_month,
@@ -591,7 +541,6 @@ def fetch_all_reports(cfg, period_start: str, period_end: str):
             dynamic_field="title",
         )
 
-        # Webhook für by_dynamic_field(city)
         send_report_to_webhook(
             employer_id=employer_id,
             selected_month=selected_month,
