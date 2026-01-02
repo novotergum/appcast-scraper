@@ -18,6 +18,9 @@ STATUSES = ["sponsored", "unsponsored", "expired", "aggregated", "suspended"]
 # Frühestes Datum, ab dem Tagesdaten verfügbar sind
 EARLIEST_DAILY_DATE = datetime(2025, 11, 17).date()
 
+# Optional: zusätzlich zu "rows" auch "flat_rows" mitsenden (stabiler fürs Mapping in Make/Sheets)
+INCLUDE_FLAT_ROWS = True
+
 
 def localize_decimals_for_de(obj):
     """
@@ -59,9 +62,6 @@ def last_calendar_week_range() -> tuple[str, str]:
     """
     Liefert die letzte vollständige Kalenderwoche (Montag–Sonntag)
     relativ zu heute (UTC) als (start_date, end_date) im Format YYYY-MM-DD.
-
-    Beispiel: Aufruf am Montag, 2025-12-08
-    → Ergebnis: 2025-12-01 (Mo) bis 2025-12-07 (So).
     """
     today = datetime.utcnow().date()
     this_monday = today - timedelta(days=today.weekday())  # 0 = Montag
@@ -81,8 +81,6 @@ def get_config():
         )
 
     employer_id = os.getenv("APPCAST_EMPLOYER_ID", DEFAULT_EMPLOYER_ID)
-
-    # Für hero_metrics / tiles_by_day weiterhin ein Monats-Parameter
     selected_month = current_month_yyyy_mm()
 
     job_board_ids_raw = os.getenv("APPCAST_JOB_BOARD_IDS", "")
@@ -133,14 +131,12 @@ def login_with_playwright(pw, cfg):
     print(f"Öffne Login-Seite: {LOGIN_URL}")
     page.goto(LOGIN_URL, wait_until="networkidle")
 
-    # Schritt 1: E-Mail
     print("Fülle E-Mail-Feld …")
     page.fill("#user_session_email", cfg["email"])
 
     print("Klicke ersten 'Log In' …")
     page.click("button.btn-login")
 
-    # Schritt 2: Passwortfeld abwarten
     print("Warte auf Passwortfeld …")
     page.wait_for_selector("#user_session_password", timeout=30_000)
 
@@ -150,7 +146,6 @@ def login_with_playwright(pw, cfg):
     print("Klicke zweiten 'Log In' …")
     page.click("button.btn-login")
 
-    # Warten, bis /api/info/user mit 200 kommt → sicher eingeloggt
     def is_logged_in(response):
         try:
             return "/api/info/user" in response.url and response.status == 200
@@ -164,13 +159,7 @@ def login_with_playwright(pw, cfg):
     return browser, context
 
 
-def fetch_and_save(
-    api_context,
-    url_path: str,
-    params: dict,
-    out_file: Path,
-    postprocess=None,
-):
+def fetch_and_save(api_context, url_path: str, params: dict, out_file: Path, postprocess=None):
     """
     Hilfsfunktion: Request bauen, GET ausführen, JSON (optional transformiert) speichern.
     Gibt die (ggf. postprozessierten) Daten zurück.
@@ -182,9 +171,7 @@ def fetch_and_save(
     resp = api_context.get(full_url)
     if not resp.ok:
         text = resp.text()
-        raise RuntimeError(
-            f"Request fehlgeschlagen: {resp.status} {resp.status_text()}\n{text}"
-        )
+        raise RuntimeError(f"Request fehlgeschlagen: {resp.status} {resp.status_text()}\n{text}")
 
     data = resp.json()
 
@@ -200,17 +187,14 @@ def fetch_and_save(
 
 def filter_tiles_by_day_from_earliest(data):
     """
-    Filtert tiles_by_day-Daten so, dass nur Einträge mit date >= EARLIEST_DAILY_DATE
-    übrig bleiben.
+    Filtert tiles_by_day-Daten so, dass nur Einträge mit date >= EARLIEST_DAILY_DATE übrig bleiben.
     """
-
     def parse_date(value: str):
         try:
             return datetime.strptime(value[:10], "%Y-%m-%d").date()
         except Exception:
             return None
 
-    # Fall 1: Top-Level-Liste
     if isinstance(data, list):
         filtered = []
         for item in data:
@@ -220,13 +204,9 @@ def filter_tiles_by_day_from_earliest(data):
                     filtered.append(item)
             else:
                 filtered.append(item)
-        print(
-            f"tiles_by_day: Filter auf >= {EARLIEST_DAILY_DATE}, "
-            f"{len(data)} → {len(filtered)} Einträge"
-        )
+        print(f"tiles_by_day: Filter auf >= {EARLIEST_DAILY_DATE}, {len(data)} → {len(filtered)} Einträge")
         return filtered
 
-    # Fall 2: Top-Level-Dict mit Liste(n)
     if isinstance(data, dict):
         modified = False
         for key, val in list(data.items()):
@@ -311,25 +291,20 @@ def send_report_to_webhook(
 def extract_by_day_rows(by_day_data) -> list[dict]:
     """
     Extrahiert aus der by_day API-Antwort eine Liste von Tages-Objekten.
-    Unterstützt:
-    - Liste von Dicts: [{date: 'YYYY-MM-DD', ...}, ...]
-    - Dict mit Liste unter 'data' oder anderem Key
+
+    Dein reales Format (Beispiel):
+    { "rows": [ { "date": "...", "job_boards": [...] }, ... ] }
     """
+    if isinstance(by_day_data, dict) and isinstance(by_day_data.get("rows"), list):
+        return [r for r in by_day_data["rows"] if isinstance(r, dict) and "date" in r]
+
+    # Fallbacks (falls Appcast mal anders liefert)
     if isinstance(by_day_data, list):
-        return [
-            x
-            for x in by_day_data
-            if isinstance(x, dict) and ("date" in x or "day" in x)
-        ]
+        return [x for x in by_day_data if isinstance(x, dict) and ("date" in x or "day" in x)]
 
     if isinstance(by_day_data, dict):
         if isinstance(by_day_data.get("data"), list):
-            return [
-                x
-                for x in by_day_data["data"]
-                if isinstance(x, dict) and ("date" in x or "day" in x)
-            ]
-
+            return [x for x in by_day_data["data"] if isinstance(x, dict) and ("date" in x or "day" in x)]
         for _, val in by_day_data.items():
             if isinstance(val, list) and val:
                 sample = next((v for v in val if isinstance(v, dict)), None)
@@ -339,17 +314,107 @@ def extract_by_day_rows(by_day_data) -> list[dict]:
     return []
 
 
-def send_by_day_aggregate_to_webhook(
-    employer_id: str,
-    selected_month: str,
-    by_day_data,
-):
+def filter_by_day_rows_to_range(rows: list[dict], start_date: str, end_date: str) -> list[dict]:
+    """Sicherheitsfilter: nur rows innerhalb [start_date, end_date] behalten."""
+    try:
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
+    except Exception:
+        return rows
+
+    def _parse(d):
+        try:
+            return datetime.strptime(d[:10], "%Y-%m-%d").date()
+        except Exception:
+            return None
+
+    out = []
+    for r in rows:
+        d = _parse(r.get("date", ""))
+        if d and start_dt <= d <= end_dt:
+            out.append(r)
+    return out
+
+
+def flatten_by_day_rows(rows: list[dict]) -> list[dict]:
     """
-    by_day wird NICHT täglich gesendet, sondern im gleichen Turnus wie der Run
-    (z.B. wöchentlich). Dabei bleibt die Granularität tagesbasiert, aber:
-    - genau 1 Webhook-Request pro Run
-    - Payload enthält KEIN start_date/end_date
-    - Payload enthält days=[{date:..., ...}, ...] (für Iterator in Make)
+    Flatten für Make/Sheets: eine Zeile pro (date × job_board).
+
+    Ergebnisfelder (Beispiele):
+    - date
+    - job_board_id, job_board_name, currency, timezone, px
+    - actual_spend_value, clicks_value, applies_value, cpc_value, cpa_value, cta_value, ...
+    - plus optional *_paid/_unpaid/_total wo vorhanden
+    """
+    flat = []
+
+    def pick_metric(obj, prefix: str):
+        # obj z.B. {"value": 94.5, "info": {"paid":..., "unpaid":..., "total":...}}
+        if not isinstance(obj, dict):
+            return {}
+        out = {}
+        if "value" in obj:
+            out[f"{prefix}_value"] = obj.get("value")
+        info = obj.get("info")
+        if isinstance(info, dict):
+            if "paid" in info:
+                out[f"{prefix}_paid"] = info.get("paid")
+            if "unpaid" in info:
+                out[f"{prefix}_unpaid"] = info.get("unpaid")
+            if "total" in info:
+                out[f"{prefix}_total"] = info.get("total")
+        return out
+
+    metric_keys = [
+        "actual_spend",
+        "clicks",
+        "applies",
+        "cpc",
+        "cpa",
+        "cta",
+        "apply_starts",
+        "cpas",
+        "apply_clickouts",
+        "cpac",
+        "qualified",
+        "hired",
+    ]
+
+    for r in rows:
+        date = r.get("date")
+        job_boards = r.get("job_boards") or []
+        if not isinstance(job_boards, list) or not job_boards:
+            # Falls keine job_boards vorhanden: trotzdem Row ausgeben
+            flat.append({"date": date})
+            continue
+
+        for jb in job_boards:
+            if not isinstance(jb, dict):
+                continue
+            row = {
+                "date": date,
+                "job_board_id": jb.get("id"),
+                "job_board_name": jb.get("name"),
+                "currency": jb.get("currency"),
+                "timezone": jb.get("timezone"),
+                "px": jb.get("px"),
+            }
+            for k in metric_keys:
+                if k in jb:
+                    row.update(pick_metric(jb.get(k), k))
+            flat.append(row)
+
+    return flat
+
+
+def send_by_day_aggregate_to_webhook(employer_id: str, selected_month: str, by_day_data, daily_start: str, daily_end: str):
+    """
+    by_day wird NICHT täglich gesendet, sondern im gleichen Turnus wie der Run (z.B. wöchentlich).
+
+    Wichtig nach deiner Vorgabe:
+    - Payload enthält KEIN start_date/end_date Felder.
+    - Payload enthält "rows" (tagesbasiert) – perfekt für Iterator in Make.
+    - Optional zusätzlich: "flat_rows" (noch einfacher fürs Mapping in Sheets).
     """
     hook_url = get_appcast_hook_url()
     if not hook_url:
@@ -358,14 +423,14 @@ def send_by_day_aggregate_to_webhook(
 
     rows = extract_by_day_rows(by_day_data)
     if not rows:
-        print("by_day: Keine Tageszeilen gefunden – Webhook wird nicht gesendet.")
+        print("by_day: Keine rows gefunden – Webhook wird nicht gesendet.")
         return
 
-    # Stabil nach Datum sortieren (hilft Make/Sheets)
-    def _key(r):
-        return (r.get("date") or r.get("day") or "")
+    # Sicherstellen, dass nur der tatsächlich angefragte Zeitraum rausgeht
+    rows = filter_by_day_rows_to_range(rows, daily_start, daily_end)
 
-    rows = sorted(rows, key=_key)
+    # Stabil nach Datum sortieren
+    rows = sorted(rows, key=lambda r: (r.get("date") or ""))
 
     payload = {
         "employer_id": employer_id,
@@ -373,8 +438,13 @@ def send_by_day_aggregate_to_webhook(
         "report_type": "by_day",
         "granularity": "day",
         "timestamp_utc": datetime.utcnow().isoformat(),
-        "days": localize_decimals_for_de(rows),
+        # KEIN start_date / end_date im Payload
+        "rows": localize_decimals_for_de(rows),
     }
+
+    if INCLUDE_FLAT_ROWS:
+        flat_rows = flatten_by_day_rows(rows)
+        payload["flat_rows"] = localize_decimals_for_de(flat_rows)
 
     print(f"Sende by_day (tagesgranular, 1 Payload) an Webhook {hook_url} …")
     try:
@@ -396,7 +466,7 @@ def fetch_all_reports(cfg, period_start: str, period_end: str):
 
     # Jahr anhand des Enddatums bestimmen (für Jahres-Reports)
     year = period_end.split("-")[0]
-    year_start = f"{year}-01-01"
+    year_start = f"{year}-1-1"
     year_end = f"{year}-12-31"
 
     period_label = f"{period_start}_to_{period_end}"
@@ -428,7 +498,6 @@ def fetch_all_reports(cfg, period_start: str, period_end: str):
             out_dir / f"hero_metrics_{selected_month}.json",
         )
 
-        # Gemeinsame Basis für weitere Reports
         common = build_common_report_params()
 
         # 2) by_month (Jahresübersicht für das Jahr des Enddatums)
@@ -500,7 +569,7 @@ def fetch_all_reports(cfg, period_start: str, period_end: str):
             out_dir / f"by_dynamic_field_city_{period_label}.json",
         )
 
-        # 4) by_week (Zeitraum period_start–period_end, typischerweise eine Woche)
+        # 4) by_week (Zeitraum period_start–period_end)
         by_week_params = {
             **common,
             "start_date": period_start,
@@ -538,17 +607,18 @@ def fetch_all_reports(cfg, period_start: str, period_end: str):
                 by_day_path,
             )
 
-            # Webhook: by_day tagesgranular, aber nur 1x pro Run (kein start/end im Payload)
+            # Webhook: by_day tagesgranular, aber nur 1x pro Run; ohne start/end Felder im Payload
             send_by_day_aggregate_to_webhook(
                 employer_id=employer_id,
                 selected_month=selected_month,
                 by_day_data=by_day_data,
+                daily_start=daily_start,
+                daily_end=daily_end,
             )
         else:
             print(
                 f"Überspringe by_day: Zeitraum {period_start} bis {period_end} "
-                f"liegt vollständig vor dem Startdatum für Tagesdaten "
-                f"({EARLIEST_DAILY_DATE})."
+                f"liegt vollständig vor dem Startdatum für Tagesdaten ({EARLIEST_DAILY_DATE})."
             )
 
         # Webhook für by_dynamic_field(title)
@@ -573,7 +643,7 @@ def fetch_all_reports(cfg, period_start: str, period_end: str):
             dynamic_field="city",
         )
 
-        # 6) by_source_index (job_board-spezifisch, Zeitraum period_start–period_end)
+        # 6) by_source_index (job_board-spezifisch)
         source_params = {
             "start_date": period_start,
             "end_date": period_end,
