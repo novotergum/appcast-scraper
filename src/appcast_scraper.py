@@ -18,7 +18,7 @@ STATUSES = ["sponsored", "unsponsored", "expired", "aggregated", "suspended"]
 # Frühestes Datum, ab dem Tagesdaten verfügbar sind
 EARLIEST_DAILY_DATE = datetime(2025, 11, 17).date()
 
-# Optional: zusätzlich zu "rows" auch "flat_rows" mitsenden (stabiler fürs Mapping in Make/Sheets)
+# Optional: zusätzlich zu "flat_rows" im by_day Payload (empfohlen für Make Iterator)
 INCLUDE_FLAT_ROWS = True
 
 
@@ -26,10 +26,6 @@ def localize_decimals_for_de(obj):
     """
     Konvertiert alle int/float-Werte in Strings mit deutschem Dezimaltrennzeichen.
     Beispiel: 5.83 -> "5,83"
-
-    Wichtig:
-    - Struktur (Dicts/Listen) bleibt erhalten.
-    - Nur Zahlen werden verändert, alle anderen Typen bleiben unverändert.
     """
     if isinstance(obj, dict):
         return {k: localize_decimals_for_de(v) for k, v in obj.items()}
@@ -120,7 +116,6 @@ def build_common_report_params() -> dict:
 def login_with_playwright(pw, cfg):
     """
     Zweistufiger Login:
-
     1) E-Mail eingeben, Log In klicken
     2) Passwortfeld abwarten, Passwort eingeben, erneut Log In klicken
     """
@@ -186,9 +181,7 @@ def fetch_and_save(api_context, url_path: str, params: dict, out_file: Path, pos
 
 
 def filter_tiles_by_day_from_earliest(data):
-    """
-    Filtert tiles_by_day-Daten so, dass nur Einträge mit date >= EARLIEST_DAILY_DATE übrig bleiben.
-    """
+    """Filtert tiles_by_day-Daten so, dass nur Einträge mit date >= EARLIEST_DAILY_DATE übrig bleiben."""
     def parse_date(value: str):
         try:
             return datetime.strptime(value[:10], "%Y-%m-%d").date()
@@ -235,11 +228,7 @@ def filter_tiles_by_day_from_earliest(data):
 
 
 def get_appcast_hook_url() -> str | None:
-    """
-    Ermittelt die Webhook-URL aus der Umgebung:
-    - 'appcast_hook' (klein) oder
-    - 'APPCAST_HOOK' (groß)
-    """
+    """Ermittelt die Webhook-URL aus der Umgebung: 'appcast_hook' oder 'APPCAST_HOOK'."""
     env_url = os.getenv("appcast_hook") or os.getenv("APPCAST_HOOK")
     if env_url:
         return env_url.strip()
@@ -257,9 +246,6 @@ def send_report_to_webhook(
 ):
     """
     Webhook-Sender für range-basierte Reporttypen (by_week, by_dynamic_field, ...).
-
-    Alle Zahlen werden vor dem Senden in deutsche Schreibweise konvertiert
-    (5.83 → "5,83"), damit sie in Google Sheets / Make als Strings mit Komma ankommen.
     """
     hook_url = get_appcast_hook_url()
     if not hook_url:
@@ -288,28 +274,18 @@ def send_report_to_webhook(
         print(f"Fehler beim Senden an Webhook: {e}")
 
 
+# ---- by_day: strikt "date" als Metric-Key ----
+
 def extract_by_day_rows(by_day_data) -> list[dict]:
     """
-    Extrahiert aus der by_day API-Antwort eine Liste von Tages-Objekten.
-
-    Dein reales Format (Beispiel):
-    { "rows": [ { "date": "...", "job_boards": [...] }, ... ] }
+    Extrahiert aus by_day die rows (strict):
+    { "rows": [ { "date": "YYYY-MM-DD", "job_boards": [...] }, ... ] }
     """
     if isinstance(by_day_data, dict) and isinstance(by_day_data.get("rows"), list):
         return [r for r in by_day_data["rows"] if isinstance(r, dict) and "date" in r]
 
-    # Fallbacks (falls Appcast mal anders liefert)
     if isinstance(by_day_data, list):
-        return [x for x in by_day_data if isinstance(x, dict) and ("date" in x or "day" in x)]
-
-    if isinstance(by_day_data, dict):
-        if isinstance(by_day_data.get("data"), list):
-            return [x for x in by_day_data["data"] if isinstance(x, dict) and ("date" in x or "day" in x)]
-        for _, val in by_day_data.items():
-            if isinstance(val, list) and val:
-                sample = next((v for v in val if isinstance(v, dict)), None)
-                if sample and ("date" in sample or "day" in sample):
-                    return [x for x in val if isinstance(x, dict)]
+        return [x for x in by_day_data if isinstance(x, dict) and "date" in x]
 
     return []
 
@@ -339,17 +315,10 @@ def filter_by_day_rows_to_range(rows: list[dict], start_date: str, end_date: str
 def flatten_by_day_rows(rows: list[dict]) -> list[dict]:
     """
     Flatten für Make/Sheets: eine Zeile pro (date × job_board).
-
-    Ergebnisfelder (Beispiele):
-    - date
-    - job_board_id, job_board_name, currency, timezone, px
-    - actual_spend_value, clicks_value, applies_value, cpc_value, cpa_value, cta_value, ...
-    - plus optional *_paid/_unpaid/_total wo vorhanden
     """
     flat = []
 
     def pick_metric(obj, prefix: str):
-        # obj z.B. {"value": 94.5, "info": {"paid":..., "unpaid":..., "total":...}}
         if not isinstance(obj, dict):
             return {}
         out = {}
@@ -384,7 +353,6 @@ def flatten_by_day_rows(rows: list[dict]) -> list[dict]:
         date = r.get("date")
         job_boards = r.get("job_boards") or []
         if not isinstance(job_boards, list) or not job_boards:
-            # Falls keine job_boards vorhanden: trotzdem Row ausgeben
             flat.append({"date": date})
             continue
 
@@ -407,14 +375,21 @@ def flatten_by_day_rows(rows: list[dict]) -> list[dict]:
     return flat
 
 
-def send_by_day_aggregate_to_webhook(employer_id: str, selected_month: str, by_day_data, daily_start: str, daily_end: str):
+def send_by_day_aggregate_to_webhook(
+    employer_id: str,
+    selected_month: str,
+    by_day_data,
+    daily_start: str,
+    daily_end: str,
+):
     """
-    by_day wird NICHT täglich gesendet, sondern im gleichen Turnus wie der Run (z.B. wöchentlich).
+    by_day wird im gleichen Turnus wie der Run gesendet (z.B. wöchentlich),
+    aber tagesgranular in EINEM Payload.
 
-    Wichtig nach deiner Vorgabe:
-    - Payload enthält KEIN start_date/end_date Felder.
-    - Payload enthält "rows" (tagesbasiert) – perfekt für Iterator in Make.
-    - Optional zusätzlich: "flat_rows" (noch einfacher fürs Mapping in Sheets).
+    Vorgabe umgesetzt:
+    - Keine start_date/end_date Felder im Payload.
+    - metric_key ist "date".
+    - Iterator in Make kann auf payload["rows"] oder payload["flat_rows"] laufen.
     """
     hook_url = get_appcast_hook_url()
     if not hook_url:
@@ -426,25 +401,21 @@ def send_by_day_aggregate_to_webhook(employer_id: str, selected_month: str, by_d
         print("by_day: Keine rows gefunden – Webhook wird nicht gesendet.")
         return
 
-    # Sicherstellen, dass nur der tatsächlich angefragte Zeitraum rausgeht
     rows = filter_by_day_rows_to_range(rows, daily_start, daily_end)
-
-    # Stabil nach Datum sortieren
-    rows = sorted(rows, key=lambda r: (r.get("date") or ""))
+    rows = sorted(rows, key=lambda r: r.get("date", ""))
 
     payload = {
         "employer_id": employer_id,
         "selected_month": selected_month,
         "report_type": "by_day",
+        "metric_key": "date",
         "granularity": "day",
         "timestamp_utc": datetime.utcnow().isoformat(),
-        # KEIN start_date / end_date im Payload
         "rows": localize_decimals_for_de(rows),
     }
 
     if INCLUDE_FLAT_ROWS:
-        flat_rows = flatten_by_day_rows(rows)
-        payload["flat_rows"] = localize_decimals_for_de(flat_rows)
+        payload["flat_rows"] = localize_decimals_for_de(flatten_by_day_rows(rows))
 
     print(f"Sende by_day (tagesgranular, 1 Payload) an Webhook {hook_url} …")
     try:
@@ -457,8 +428,8 @@ def send_by_day_aggregate_to_webhook(employer_id: str, selected_month: str, by_d
 
 def fetch_all_reports(cfg, period_start: str, period_end: str):
     """
-    Holt alle Reports für einen beliebigen Datumsbereich period_start/period_end
-    (YYYY-MM-DD). Typischer Use Case hier: letzte Kalenderwoche (Mo–So).
+    Holt alle Reports für einen beliebigen Datumsbereich period_start/period_end (YYYY-MM-DD).
+    Typischer Use Case: letzte Kalenderwoche (Mo–So).
     hero_metrics / tiles_by_day bleiben monatsbasiert.
     """
     selected_month = cfg["selected_month"]
@@ -501,11 +472,7 @@ def fetch_all_reports(cfg, period_start: str, period_end: str):
         common = build_common_report_params()
 
         # 2) by_month (Jahresübersicht für das Jahr des Enddatums)
-        by_month_params = {
-            **common,
-            "start_month": year_start,
-            "end_month": year_end,
-        }
+        by_month_params = {**common, "start_month": year_start, "end_month": year_end}
         fetch_and_save(
             api_context,
             f"/api/reports/employer/{employer_id}/by_month",
@@ -513,7 +480,7 @@ def fetch_all_reports(cfg, period_start: str, period_end: str):
             out_dir / f"by_month_{year}.json",
         )
 
-        # 3) by_dynamic_field (tagged_category_id, Zeitraum period_start–period_end)
+        # 3) by_dynamic_field (tagged_category_id)
         by_dyn_params = {
             **common,
             "pjg": "false",
@@ -531,7 +498,7 @@ def fetch_all_reports(cfg, period_start: str, period_end: str):
             out_dir / f"by_dynamic_field_tagged_category_{period_label}.json",
         )
 
-        # 3b) by_dynamic_field (title, Zeitraum period_start–period_end, sortiert nach Spend)
+        # 3b) by_dynamic_field (title)
         by_dyn_title_params = {
             **common,
             "pjg": "false",
@@ -550,7 +517,7 @@ def fetch_all_reports(cfg, period_start: str, period_end: str):
             out_dir / f"by_dynamic_field_title_{period_label}.json",
         )
 
-        # 3c) by_dynamic_field (city, Zeitraum period_start–period_end, sortiert nach Spend)
+        # 3c) by_dynamic_field (city)
         by_dyn_city_params = {
             **common,
             "pjg": "false",
@@ -569,12 +536,8 @@ def fetch_all_reports(cfg, period_start: str, period_end: str):
             out_dir / f"by_dynamic_field_city_{period_label}.json",
         )
 
-        # 4) by_week (Zeitraum period_start–period_end)
-        by_week_params = {
-            **common,
-            "start_date": period_start,
-            "end_date": period_end,
-        }
+        # 4) by_week
+        by_week_params = {**common, "start_date": period_start, "end_date": period_end}
         fetch_and_save(
             api_context,
             f"/api/reports/employer/{employer_id}/by_week",
@@ -594,11 +557,7 @@ def fetch_all_reports(cfg, period_start: str, period_end: str):
             daily_end = daily_end_dt.strftime("%Y-%m-%d")
             daily_label = f"{daily_start}_to_{daily_end}"
 
-            by_day_params = {
-                **common,
-                "start_date": daily_start,
-                "end_date": daily_end,
-            }
+            by_day_params = {**common, "start_date": daily_start, "end_date": daily_end}
             by_day_path = out_dir / f"by_day_{daily_label}.json"
             by_day_data = fetch_and_save(
                 api_context,
@@ -607,7 +566,7 @@ def fetch_all_reports(cfg, period_start: str, period_end: str):
                 by_day_path,
             )
 
-            # Webhook: by_day tagesgranular, aber nur 1x pro Run; ohne start/end Felder im Payload
+            # Webhook: by_day (tagesgranular, 1 Payload), metric_key="date", ohne start/end im Payload
             send_by_day_aggregate_to_webhook(
                 employer_id=employer_id,
                 selected_month=selected_month,
@@ -643,7 +602,7 @@ def fetch_all_reports(cfg, period_start: str, period_end: str):
             dynamic_field="city",
         )
 
-        # 6) by_source_index (job_board-spezifisch)
+        # 6) by_source_index
         source_params = {
             "start_date": period_start,
             "end_date": period_end,
@@ -661,11 +620,8 @@ def fetch_all_reports(cfg, period_start: str, period_end: str):
             out_dir / f"by_source_index_{period_label}.json",
         )
 
-        # 7) tiles_by_day (Dashboard-Kacheln pro Tag – weiterhin monatsbasiert)
-        tiles_params = {
-            "selected_month": selected_month,
-            "job_board_id": cfg["tiles_job_board_id"],
-        }
+        # 7) tiles_by_day (monatsbasiert)
+        tiles_params = {"selected_month": selected_month, "job_board_id": cfg["tiles_job_board_id"]}
         fetch_and_save(
             api_context,
             f"/api/dashboards/employer/{employer_id}/tiles_by_day",
