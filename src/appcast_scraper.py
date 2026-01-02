@@ -33,7 +33,6 @@ def localize_decimals_for_de(obj):
     if isinstance(obj, list):
         return [localize_decimals_for_de(v) for v in obj]
     if isinstance(obj, (int, float)):
-        # 2 Nachkommastellen, Trailing-Nullen optional abschneiden
         s = f"{obj:.2f}"
         if "." in s:
             s = s.rstrip("0").rstrip(".")
@@ -82,14 +81,12 @@ def get_config():
         )
 
     employer_id = os.getenv("APPCAST_EMPLOYER_ID", DEFAULT_EMPLOYER_ID)
-    # Für hero_metrics / tiles_by_day weiterhin ein Monats-Parameter,
-    # alle date-basierten Reports werden über period_start/period_end gesteuert.
+
+    # Für hero_metrics / tiles_by_day weiterhin ein Monats-Parameter
     selected_month = current_month_yyyy_mm()
 
     job_board_ids_raw = os.getenv("APPCAST_JOB_BOARD_IDS", "")
-    job_board_ids = [
-        jb.strip() for jb in job_board_ids_raw.split(",") if jb.strip()
-    ]
+    job_board_ids = [jb.strip() for jb in job_board_ids_raw.split(",") if jb.strip()]
 
     tiles_job_board_id = os.getenv("APPCAST_TILES_JOB_BOARD_ID", "")
 
@@ -209,7 +206,6 @@ def filter_tiles_by_day_from_earliest(data):
 
     def parse_date(value: str):
         try:
-            # Schneide ggf. Zeitanteil ab
             return datetime.strptime(value[:10], "%Y-%m-%d").date()
         except Exception:
             return None
@@ -263,7 +259,6 @@ def get_appcast_hook_url() -> str | None:
     Ermittelt die Webhook-URL aus der Umgebung:
     - 'appcast_hook' (klein) oder
     - 'APPCAST_HOOK' (groß)
-    Kein Fallback im Code.
     """
     env_url = os.getenv("appcast_hook") or os.getenv("APPCAST_HOOK")
     if env_url:
@@ -281,12 +276,7 @@ def send_report_to_webhook(
     **extra_meta,
 ):
     """
-    Generischer Webhook-Sender für verschiedene Reporttypen.
-
-    Beispiele:
-    - report_type="by_day"
-    - report_type="by_dynamic_field", dynamic_field="title"
-    - report_type="by_dynamic_field", dynamic_field="city"
+    Webhook-Sender für range-basierte Reporttypen (by_week, by_dynamic_field, ...).
 
     Alle Zahlen werden vor dem Senden in deutsche Schreibweise konvertiert
     (5.83 → "5,83"), damit sie in Google Sheets / Make als Strings mit Komma ankommen.
@@ -318,6 +308,83 @@ def send_report_to_webhook(
         print(f"Fehler beim Senden an Webhook: {e}")
 
 
+def extract_by_day_rows(by_day_data) -> list[dict]:
+    """
+    Extrahiert aus der by_day API-Antwort eine Liste von Tages-Objekten.
+    Unterstützt:
+    - Liste von Dicts: [{date: 'YYYY-MM-DD', ...}, ...]
+    - Dict mit Liste unter 'data' oder anderem Key
+    """
+    if isinstance(by_day_data, list):
+        return [
+            x
+            for x in by_day_data
+            if isinstance(x, dict) and ("date" in x or "day" in x)
+        ]
+
+    if isinstance(by_day_data, dict):
+        if isinstance(by_day_data.get("data"), list):
+            return [
+                x
+                for x in by_day_data["data"]
+                if isinstance(x, dict) and ("date" in x or "day" in x)
+            ]
+
+        for _, val in by_day_data.items():
+            if isinstance(val, list) and val:
+                sample = next((v for v in val if isinstance(v, dict)), None)
+                if sample and ("date" in sample or "day" in sample):
+                    return [x for x in val if isinstance(x, dict)]
+
+    return []
+
+
+def send_by_day_aggregate_to_webhook(
+    employer_id: str,
+    selected_month: str,
+    by_day_data,
+):
+    """
+    by_day wird NICHT täglich gesendet, sondern im gleichen Turnus wie der Run
+    (z.B. wöchentlich). Dabei bleibt die Granularität tagesbasiert, aber:
+    - genau 1 Webhook-Request pro Run
+    - Payload enthält KEIN start_date/end_date
+    - Payload enthält days=[{date:..., ...}, ...] (für Iterator in Make)
+    """
+    hook_url = get_appcast_hook_url()
+    if not hook_url:
+        print("Kein appcast_hook / APPCAST_HOOK gesetzt – Webhook wird übersprungen.")
+        return
+
+    rows = extract_by_day_rows(by_day_data)
+    if not rows:
+        print("by_day: Keine Tageszeilen gefunden – Webhook wird nicht gesendet.")
+        return
+
+    # Stabil nach Datum sortieren (hilft Make/Sheets)
+    def _key(r):
+        return (r.get("date") or r.get("day") or "")
+
+    rows = sorted(rows, key=_key)
+
+    payload = {
+        "employer_id": employer_id,
+        "selected_month": selected_month,
+        "report_type": "by_day",
+        "granularity": "day",
+        "timestamp_utc": datetime.utcnow().isoformat(),
+        "days": localize_decimals_for_de(rows),
+    }
+
+    print(f"Sende by_day (tagesgranular, 1 Payload) an Webhook {hook_url} …")
+    try:
+        resp = requests.post(hook_url, json=payload, timeout=20)
+        resp.raise_for_status()
+        print(f"Webhook erfolgreich: HTTP {resp.status_code}")
+    except Exception as e:
+        print(f"Fehler beim Senden an Webhook: {e}")
+
+
 def fetch_all_reports(cfg, period_start: str, period_end: str):
     """
     Holt alle Reports für einen beliebigen Datumsbereich period_start/period_end
@@ -329,7 +396,7 @@ def fetch_all_reports(cfg, period_start: str, period_end: str):
 
     # Jahr anhand des Enddatums bestimmen (für Jahres-Reports)
     year = period_end.split("-")[0]
-    year_start = f"{year}-1-1"
+    year_start = f"{year}-01-01"
     year_end = f"{year}-12-31"
 
     period_label = f"{period_start}_to_{period_end}"
@@ -392,8 +459,7 @@ def fetch_all_reports(cfg, period_start: str, period_end: str):
             api_context,
             f"/api/reports/employer/{employer_id}/by_dynamic_field",
             by_dyn_params,
-            out_dir
-            / f"by_dynamic_field_tagged_category_{period_label}.json",
+            out_dir / f"by_dynamic_field_tagged_category_{period_label}.json",
         )
 
         # 3b) by_dynamic_field (title, Zeitraum period_start–period_end, sortiert nach Spend)
@@ -472,14 +538,11 @@ def fetch_all_reports(cfg, period_start: str, period_end: str):
                 by_day_path,
             )
 
-            # Webhook mit by_day-Report (mit DE-Lokalisierung) triggern
-            send_report_to_webhook(
+            # Webhook: by_day tagesgranular, aber nur 1x pro Run (kein start/end im Payload)
+            send_by_day_aggregate_to_webhook(
                 employer_id=employer_id,
                 selected_month=selected_month,
-                start_date=daily_start,
-                end_date=daily_end,
-                report_type="by_day",
-                report=by_day_data,
+                by_day_data=by_day_data,
             )
         else:
             print(
@@ -488,7 +551,7 @@ def fetch_all_reports(cfg, period_start: str, period_end: str):
                 f"({EARLIEST_DAILY_DATE})."
             )
 
-        # Webhook für by_dynamic_field(title) – mit lokalisierter Dezimalschreibweise
+        # Webhook für by_dynamic_field(title)
         send_report_to_webhook(
             employer_id=employer_id,
             selected_month=selected_month,
@@ -499,7 +562,7 @@ def fetch_all_reports(cfg, period_start: str, period_end: str):
             dynamic_field="title",
         )
 
-        # Webhook für by_dynamic_field(city) – mit lokalisierter Dezimalschreibweise
+        # Webhook für by_dynamic_field(city)
         send_report_to_webhook(
             employer_id=employer_id,
             selected_month=selected_month,
@@ -519,7 +582,6 @@ def fetch_all_reports(cfg, period_start: str, period_end: str):
             "job_group_stats_source": "data",
         }
         if cfg["job_board_ids"]:
-            # job_boards[]=ac-571&job_boards[]=...
             source_params["job_boards[]"] = cfg["job_board_ids"]
 
         fetch_and_save(
