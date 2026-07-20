@@ -1,0 +1,4 @@
+Keepalive marker to prevent the scheduled GitHub Actions workflow from being
+auto-disabled after 60 days of repository inactivity.
+
+Last bump: 2026-07-20T10:05:49Z
