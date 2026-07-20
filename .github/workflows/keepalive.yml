@@ -1,0 +1,21 @@
+name: Keepalive
+
+on:
+  schedule:
+    - cron: '17 4 1 * *'   # monatlich, 1. um 04:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Monatlicher Leer-Commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit --allow-empty -m "chore: monatlicher keepalive, hält geplante Workflows aktiv"
+          git push
